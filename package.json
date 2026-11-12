@@ -1,0 +1,20 @@
+{
+  "name": "vehicle-management-system",
+  "private": true,
+  "workspaces": [
+    "dashboard",
+    "mobile",
+    "shared"
+  ],
+  "scripts": {
+    "dev:dashboard": "npm --workspace dashboard run dev",
+    "dev:mobile": "npm --workspace mobile start",
+    "build:dashboard": "npm --workspace dashboard run build",
+    "typecheck": "npm --workspace dashboard run typecheck",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "prettier": "^3.6.2"
+  }
+}
