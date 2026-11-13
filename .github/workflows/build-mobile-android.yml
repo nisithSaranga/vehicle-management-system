@@ -1,0 +1,46 @@
+name: Build mobile Android app
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'android-v*'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        working-directory: .
+        run: npm ci
+
+      - name: Typecheck mobile app
+        run: npx tsc --noEmit
+
+      - name: Build signed preview APK
+        run: npx eas-cli@latest build --platform android --profile preview --non-interactive --wait
+
+      - name: Download APK
+        run: npx eas-cli@latest build:download --platform android --profile preview --latest --output=riyon-vehicle-management.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: riyon-vehicle-management-android
+          path: mobile/riyon-vehicle-management.apk
+          if-no-files-found: error
+          retention-days: 30
