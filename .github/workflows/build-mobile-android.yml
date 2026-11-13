@@ -32,10 +32,17 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Build signed preview APK
-        run: npx eas-cli@latest build --platform android --profile preview --non-interactive --wait
+        id: build
+        run: |
+          npx eas-cli@latest build --platform android --profile preview --non-interactive --wait --json > build-result.json
+          node -e "const fs = require('fs'); const result = JSON.parse(fs.readFileSync('build-result.json', 'utf8')); const build = Array.isArray(result) ? result[0] : result; if (!build?.id) throw new Error('EAS did not return a build ID'); fs.appendFileSync(process.env.GITHUB_OUTPUT, 'build_id=' + build.id + '\n');"
 
       - name: Download APK
-        run: npx eas-cli@latest build:download --platform android --profile preview --latest --output=riyon-vehicle-management.apk
+        run: |
+          npx eas-cli@latest build:download --build-id "${{ steps.build.outputs.build_id }}" --non-interactive
+          apk=$(find . -maxdepth 1 -type f -name '*.apk' -print -quit)
+          test -n "$apk"
+          mv "$apk" riyon-vehicle-management.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
