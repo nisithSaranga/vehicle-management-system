@@ -95,12 +95,13 @@ function App() {
         </div>
         <div className="header-actions">
           <button
-            className="theme-toggle"
+            className="theme-toggle icon-toggle"
             type="button"
             onClick={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}
             aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
+            title={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
           >
-            {theme === 'light' ? 'Dark mode' : 'Light mode'}
+            {theme === 'light' ? '☾' : '☼'}
           </button>
           <span className="role-badge">{profile.role}</span>
         </div>
@@ -339,6 +340,7 @@ function VehicleProfile({
     Array<{
       service_date: string;
       service_type: string;
+      service_station: string | null;
       provider: string | null;
       cost: number | null;
     }>
@@ -368,7 +370,7 @@ function VehicleProfile({
         .order('reading_date', { ascending: false }),
       supabase
         .from('maintenance_records')
-        .select('service_date, service_type, provider, cost')
+        .select('service_date, service_type, service_station, provider, cost')
         .eq('vehicle_id', vehicle.id)
         .order('service_date', { ascending: false }),
       supabase
@@ -596,6 +598,7 @@ function VehicleProfile({
             {maintenance.map((record) => (
               <li key={`${record.service_date}-${record.service_type}`}>
                 {record.service_date}: {record.service_type}
+                {record.service_station ? ` · ${record.service_station}` : ''}
                 {record.provider ? ` · ${record.provider}` : ''}
                 {record.cost ? ` · ${record.cost}` : ''}
               </li>
@@ -1002,6 +1005,7 @@ function MaintenancePanel({ canManage }: { canManage: boolean }) {
     odometer_reading: '',
     service_type: 'Preventive service',
     description: '',
+    service_station: '',
     provider: '',
     cost: '',
     next_service_date: '',
@@ -1036,6 +1040,7 @@ function MaintenancePanel({ canManage }: { canManage: boolean }) {
         vehicle_id: '',
         service_date: '',
         odometer_reading: '',
+        service_station: '',
         cost: '',
         next_service_date: '',
         next_service_mileage: '',
@@ -1083,6 +1088,12 @@ function MaintenancePanel({ canManage }: { canManage: boolean }) {
             required
             value={form.service_type}
             onChange={(event) => setForm({ ...form, service_type: event.target.value })}
+          />
+          <input
+            placeholder="Service station / garage"
+            required
+            value={form.service_station}
+            onChange={(event) => setForm({ ...form, service_station: event.target.value })}
           />
           <input
             placeholder="Provider"
@@ -1270,7 +1281,7 @@ function ReportsPanel() {
       supabase
         .from('maintenance_records')
         .select(
-          'service_date, odometer_reading, service_type, description, provider, cost, next_service_date, next_service_mileage',
+          'service_date, odometer_reading, service_type, description, service_station, provider, cost, next_service_date, next_service_mileage',
         )
         .eq('vehicle_id', vehicle.id)
         .order('service_date'),
@@ -1331,6 +1342,7 @@ function ReportsPanel() {
         'Odometer reading',
         'Service type',
         'Description',
+        'Service station / garage',
         'Provider',
         'Cost',
         'Next service date',
@@ -1341,6 +1353,7 @@ function ReportsPanel() {
         record.odometer_reading,
         record.service_type,
         record.description,
+        record.service_station,
         record.provider,
         record.cost,
         record.next_service_date,

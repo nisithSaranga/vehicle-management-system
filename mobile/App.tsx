@@ -7,7 +7,6 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
-  Switch,
   Text,
   TextInput,
   View,
@@ -109,14 +108,13 @@ export default function App() {
         </View>
         <View style={styles.toolbar}>
           <Text style={[styles.role, { color: palette.muted }]}>{profile.role}</Text>
-          <View style={styles.themeRow}>
-            <Text style={{ color: palette.muted }}>Dark</Text>
-            <Switch
-              value={dark}
-              onValueChange={(v) => setTheme(v ? 'dark' : 'light')}
-              trackColor={{ true: colors.red }}
-            />
-          </View>
+          <Pressable
+            style={styles.themeToggle}
+            onPress={() => setTheme(dark ? 'light' : 'dark')}
+            accessibilityLabel={`Switch to ${dark ? 'light' : 'dark'} mode`}
+          >
+            <Text style={[styles.themeSymbol, { color: palette.text }]}>{dark ? '☼' : '☾'}</Text>
+          </Pressable>
         </View>
         {error ? <Text style={styles.error}>{error}</Text> : null}
         <View style={styles.tiles}>
@@ -659,8 +657,9 @@ function Maintenance({
   const [vehicleId, setVehicleId] = useState('');
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [odometer, setOdometer] = useState('');
-  const [serviceType, setServiceType] = useState('Service');
+  const [serviceType, setServiceType] = useState('Preventive service');
   const [description, setDescription] = useState('');
+  const [serviceStation, setServiceStation] = useState('');
   const [provider, setProvider] = useState('');
   const [cost, setCost] = useState('');
   const [rows, setRows] = useState<RecordRow[]>([]);
@@ -668,7 +667,7 @@ function Maintenance({
     const { data } = await supabase
       .from('maintenance_records')
       .select(
-        'id, vehicle_id, service_date, odometer_reading, service_type, description, provider, cost',
+        'id, vehicle_id, service_date, odometer_reading, service_type, description, service_station, provider, cost',
       )
       .order('service_date', { ascending: false });
     setRows((data ?? []) as RecordRow[]);
@@ -678,12 +677,17 @@ function Maintenance({
   }, []);
   const save = async () => {
     if (!canManage) return;
+    if (!vehicleId || !date || !odometer || !serviceStation) {
+      Alert.alert('Required', 'Vehicle, date, odometer, and service station / garage are required.');
+      return;
+    }
     const { error } = await supabase.from('maintenance_records').insert({
       vehicle_id: vehicleId,
       service_date: date,
       odometer_reading: Number(odometer),
       service_type: serviceType,
       description,
+      service_station: serviceStation,
       provider,
       cost: cost ? Number(cost) : null,
     });
@@ -704,6 +708,7 @@ function Maintenance({
         ['Service date', date, setDate],
         ['Odometer', odometer, setOdometer],
         ['Service type', serviceType, setServiceType],
+        ['Service station / garage', serviceStation, setServiceStation],
         ['Description', description, setDescription],
         ['Provider', provider, setProvider],
         ['Cost', cost, setCost],
@@ -723,7 +728,8 @@ function Maintenance({
             {String(r.service_date)} · {String(r.service_type)}
           </Text>
           <Text style={{ color: palette.muted }}>
-            {String(r.provider ?? '')} · {String(r.cost ?? '')}
+            {String(r.service_station ?? '')} · {String(r.provider ?? '')} ·{' '}
+            {String(r.cost ?? '')}
           </Text>
         </View>
       ))}
@@ -1086,7 +1092,7 @@ function Reports({
         .eq('vehicle_id', v.id),
       supabase
         .from('maintenance_records')
-        .select('service_date, service_type, description, provider, cost')
+        .select('service_date, service_type, description, service_station, provider, cost')
         .eq('vehicle_id', v.id),
       supabase
         .from('inspections')
@@ -1101,7 +1107,7 @@ function Reports({
       [
         `Vehicle details\\nRegistration,${v.registration_number}\\nMake,${v.make}\\nModel,${v.model}\\nYear,${v.manufacturing_year}`,
         `Mileage history\\n${(m.data ?? []).map((r) => `${r.reading_date},${r.odometer_reading},${r.notes ?? ''}`).join('\\n')}`,
-        `Service history\\n${(s.data ?? []).map((r) => `${r.service_date},${r.service_type},${r.provider ?? ''},${r.cost ?? ''}`).join('\\n')}`,
+        `Service history\\n${(s.data ?? []).map((r) => `${r.service_date},${r.service_type},${r.service_station ?? ''},${r.provider ?? ''},${r.cost ?? ''}`).join('\\n')}`,
         `Inspection history\\n${(i.data ?? []).map((r) => `${r.inspection_date},${r.overall_condition},${r.remarks ?? ''}`).join('\\n')}`,
         `Compliance history\\n${(c.data ?? []).map((r) => `${r.compliance_type},${r.issue_date ?? ''},${r.expiry_date ?? ''},${r.status}`).join('\\n')}`,
       ].join('\\n\\n'),
@@ -1150,7 +1156,16 @@ const styles = StyleSheet.create({
     marginTop: 18,
   },
   role: { fontWeight: '700', textTransform: 'capitalize' },
-  themeRow: { alignItems: 'center', flexDirection: 'row', gap: 4 },
+  themeToggle: {
+    alignItems: 'center',
+    borderColor: colors.border,
+    borderRadius: 18,
+    borderWidth: 1,
+    height: 36,
+    justifyContent: 'center',
+    width: 36,
+  },
+  themeSymbol: { fontSize: 20, lineHeight: 24 },
   tiles: { gap: 12, marginTop: 20 },
   tile: {
     borderRadius: 16,

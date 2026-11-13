@@ -85,7 +85,7 @@ body {
   color: var(--riyon-red);
   font-size: 1.3rem;
   font-weight: 700;
-  margin: 14px 0 0;
+  margin: 14px auto 0;
   text-align: center;
 }
 
@@ -124,6 +124,17 @@ body {
 
 .theme-toggle:hover {
   background: rgb(180 35 24 / 10%);
+}
+
+.theme-toggle.icon-toggle {
+  align-items: center;
+  border-radius: 50%;
+  display: inline-flex;
+  font-size: 1.15rem;
+  height: 36px;
+  justify-content: center;
+  padding: 0;
+  width: 36px;
 }
 
 .dashboard-tiles {
