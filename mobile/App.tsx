@@ -309,6 +309,13 @@ function sectionTitle(section: Section | null) {
     reports: 'Reports',
   }[section ?? 'fleet'];
 }
+function vehicleIcon(type: string) {
+  const normalized = type.toLowerCase();
+  if (normalized.includes('bike') || normalized.includes('scooty')) return '🏍';
+  if (normalized.includes('forklift')) return '🏗';
+  if (normalized.includes('lorry') || normalized.includes('cab')) return '🚚';
+  return '🚘';
+}
 function Centered({ children, palette }: { children: ReactNode; palette: { bg: string } }) {
   return <View style={[styles.centered, { backgroundColor: palette.bg }]}>{children}</View>;
 }
@@ -439,6 +446,7 @@ function Fleet({
   palette: { card: string; text: string; muted: string };
 }) {
   const [showForm, setShowForm] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
   const [busy, setBusy] = useState(false);
   const changeStatus = async (v: VehicleRecord) => {
     setBusy(true);
@@ -450,6 +458,55 @@ function Fleet({
     else await onRefresh();
     setBusy(false);
   };
+  const deleteVehicle = async (v: VehicleRecord) => {
+    if (!canManage) return;
+    Alert.alert(
+      'Delete vehicle permanently?',
+      `${v.make} ${v.model} (${v.registration_number}) and all related records will be removed.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            setBusy(true);
+            const { data: documents } = await supabase
+              .from('vehicle_documents')
+              .select('file_path')
+              .eq('vehicle_id', v.id);
+            const paths = (documents ?? [])
+              .map((document) => document.file_path)
+              .filter((path): path is string => !!path);
+            if (paths.length) await supabase.storage.from('vehicle-documents').remove(paths);
+            const dependentTables = [
+              'reminder_logs',
+              'notifications',
+              'vehicle_documents',
+              'mileage_records',
+              'maintenance_records',
+              'compliance_records',
+              'inspections',
+            ] as const;
+            for (const table of dependentTables) {
+              const { error } = await supabase.from(table).delete().eq('vehicle_id', v.id);
+              if (error) {
+                Alert.alert('Unable to delete vehicle', error.message);
+                setBusy(false);
+                return;
+              }
+            }
+            const { error } = await supabase.from('vehicles').delete().eq('id', v.id);
+            if (error) Alert.alert('Unable to delete vehicle', error.message);
+            else await onRefresh();
+            setBusy(false);
+          },
+        },
+      ],
+    );
+  };
+  const visibleVehicles = vehicles.filter((v) =>
+    showArchived ? v.status !== 'active' : v.status === 'active',
+  );
   return (
     <Panel>
       <View style={styles.row}>
@@ -461,6 +518,20 @@ function Fleet({
           />
         )}
       </View>
+      <View style={styles.listToggle}>
+        <Pressable
+          style={[styles.listToggleButton, !showArchived && styles.listToggleActive]}
+          onPress={() => setShowArchived(false)}
+        >
+          <Text style={{ color: !showArchived ? '#fff' : palette.muted }}>Active vehicles</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.listToggleButton, showArchived && styles.listToggleActive]}
+          onPress={() => setShowArchived(true)}
+        >
+          <Text style={{ color: showArchived ? '#fff' : palette.muted }}>Archive list</Text>
+        </Pressable>
+      </View>
       {showForm && (
         <VehicleForm
           onSaved={() => {
@@ -470,29 +541,42 @@ function Fleet({
           palette={palette}
         />
       )}
-      {vehicles.length === 0 ? (
-        <Text style={{ color: palette.muted }}>No vehicles have been registered yet.</Text>
+      {visibleVehicles.length === 0 ? (
+        <Text style={{ color: palette.muted }}>
+          {showArchived ? 'No archived vehicles.' : 'No active vehicles have been registered yet.'}
+        </Text>
       ) : (
-        vehicles.map((v) => (
+        visibleVehicles.map((v) => (
           <View key={v.id} style={[styles.card, { backgroundColor: palette.card }]}>
-            <Pressable onPress={() => onSelect(v)}>
-              <Text style={[styles.cardTitle, { color: palette.text }]}>
-                {v.registration_number}
-              </Text>
-              <Text style={{ color: palette.muted }}>
-                {v.make} {v.model} · {v.vehicle_type} · {v.status}
-              </Text>
-              <Text style={{ color: palette.muted }}>
-                {v.department ?? 'No department'} · {v.assigned_driver ?? 'No driver'}
-              </Text>
-            </Pressable>
-            {canManage && (
-              <Button
-                title={v.status === 'active' ? 'Archive' : 'Restore'}
-                disabled={busy}
-                onPress={() => void changeStatus(v)}
-              />
-            )}
+            <View style={styles.vehicleListHeader}>
+              <Text style={styles.vehicleTypeIcon}>{vehicleIcon(v.vehicle_type)}</Text>
+              <View style={styles.vehicleListCopy}>
+                <Text style={[styles.cardTitle, { color: palette.text }]}>
+                  {v.make} {v.model}
+                </Text>
+                <Text style={styles.plate}>{v.registration_number}</Text>
+                <Text style={{ color: palette.muted }}>
+                  {v.vehicle_type} · {v.department ?? 'No department'}
+                </Text>
+              </View>
+            </View>
+            <View style={styles.vehicleActions}>
+              <Button title="View" onPress={() => onSelect(v)} />
+              {canManage && (
+                <Button
+                  title={v.status === 'active' ? 'Archive' : 'Restore'}
+                  disabled={busy}
+                  onPress={() => void changeStatus(v)}
+                />
+              )}
+              {canManage && v.status !== 'active' && (
+                <Button
+                  title="Delete"
+                  disabled={busy}
+                  onPress={() => void deleteVehicle(v)}
+                />
+              )}
+            </View>
           </View>
         ))
       )}
@@ -980,7 +1064,7 @@ function Documents({
     </Panel>
   );
 }
-function SignedContent({ path }: { path: string }) {
+function SignedContent({ path, gallery = false }: { path: string; gallery?: boolean }) {
   const [url, setUrl] = useState('');
   useEffect(() => {
     void supabase.storage
@@ -989,7 +1073,11 @@ function SignedContent({ path }: { path: string }) {
       .then(({ data }) => setUrl(data?.signedUrl ?? ''));
   }, [path]);
   return url ? (
-    <Image source={{ uri: url }} style={styles.documentImage} resizeMode="contain" />
+    <Image
+      source={{ uri: url }}
+      style={[styles.documentImage, gallery && styles.galleryImage]}
+      resizeMode="cover"
+    />
   ) : (
     <Text style={styles.error}>Loading document...</Text>
   );
@@ -1059,36 +1147,87 @@ function VehicleProfile({
   const addPhoto = async () => {
     if (!canManage || !photoUri) return;
     const filePath = `${vehicle.id}/${Date.now()}-${photoUri.split('/').pop() ?? 'photo'}`;
-    const response = await fetch(photoUri);
-    const blob = await response.blob();
-    const { error } = await supabase.storage
-      .from('vehicle-documents')
-      .upload(filePath, blob, { upsert: false });
-    if (error) return Alert.alert('Unable to upload photo', error.message);
-    await supabase.from('vehicle_documents').insert({
-      vehicle_id: vehicle.id,
-      document_type: 'Vehicle Photo',
-      file_path: filePath,
-      uploaded_by: userId,
-    });
-    setPhotoUri('');
-    Alert.alert('Saved', 'Vehicle photo added.');
+    try {
+      const response = await fetch(photoUri);
+      const blob = await response.blob();
+      const { error } = await supabase.storage
+        .from('vehicle-documents')
+        .upload(filePath, blob, { upsert: false });
+      if (error) throw error;
+      const { data, error: insertError } = await supabase
+        .from('vehicle_documents')
+        .insert({
+          vehicle_id: vehicle.id,
+          document_type: 'Vehicle Photo',
+          file_path: filePath,
+          uploaded_by: userId,
+        })
+        .select()
+        .single();
+      if (insertError) throw insertError;
+      setPhotos((current) => [...current, data as RecordRow]);
+      setPhotoUri('');
+      Alert.alert('Saved', 'Vehicle photo added.');
+    } catch (e) {
+      Alert.alert('Unable to upload photo', e instanceof Error ? e.message : 'Use a local file URI.');
+    }
   };
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <View style={[styles.modalPage, { backgroundColor: palette.bg }]}>
         <View style={styles.modalHeader}>
-          <Text style={[styles.modalTitle, { color: palette.text }]}>
-            {vehicle.registration_number}
-          </Text>
+          <View>
+            <Text style={[styles.vehicleDetailTitle, { color: palette.text }]}>
+              {vehicle.make} {vehicle.model}
+            </Text>
+            <Text style={styles.vehicleDetailPlate}>{vehicle.registration_number}</Text>
+          </View>
           <Pressable onPress={onClose}>
             <Text style={styles.close}>Close</Text>
           </Pressable>
         </View>
         <ScrollView contentContainerStyle={styles.panel}>
-          <Text style={{ color: palette.muted }}>
-            {vehicle.make} {vehicle.model} · {vehicle.vehicle_type} · {vehicle.status}
-          </Text>
+          <View style={styles.vehicleDetailMeta}>
+            <Text style={styles.vehicleDetailIcon}>{vehicleIcon(vehicle.vehicle_type)}</Text>
+            <Text style={{ color: palette.muted }}>
+              {vehicle.vehicle_type} · {vehicle.status === 'active' ? 'Active' : 'Archived'}
+            </Text>
+          </View>
+          {photos.length ? (
+            <View style={styles.photoSection}>
+              <View style={styles.detailSectionHeader}>
+                <Text style={[styles.detailSectionTitle, { color: palette.text }]}>Vehicle photos</Text>
+                <Text style={[styles.sectionHint, { color: palette.muted }]}>
+                  {photos.length} {photos.length === 1 ? 'photo' : 'photos'}
+                </Text>
+              </View>
+              <ScrollView
+                horizontal={photos.length > 1}
+                showsHorizontalScrollIndicator={photos.length > 1}
+                contentContainerStyle={styles.photoGallery}
+              >
+                {photos.map((p) => (
+                  <SignedContent key={p.id} path={String(p.file_path)} gallery />
+                ))}
+              </ScrollView>
+            </View>
+          ) : (
+            <View style={[styles.emptyPhoto, { backgroundColor: palette.card }]}>
+              <Text style={{ color: palette.muted }}>No photos added yet.</Text>
+            </View>
+          )}
+          {canManage && (
+            <View style={[styles.photoUploadCard, { backgroundColor: palette.card }]}>
+              <Text style={[styles.detailSectionTitle, { color: palette.text }]}>Add another photo</Text>
+              <Field
+                label="Local photo URI"
+                value={photoUri}
+                onChange={setPhotoUri}
+                palette={palette}
+              />
+              <Button title="Add photo" onPress={() => void addPhoto()} />
+            </View>
+          )}
           <View style={styles.pickerWrap}>
             {['overview', 'photos', 'mileage', 'inspections', 'maintenance', 'compliance'].map(
               (v) => (
@@ -1106,32 +1245,19 @@ function VehicleProfile({
             )}
           </View>
           {tab === 'overview' && (
-            <View style={[styles.card, { backgroundColor: palette.card }]}>
+            <View style={[styles.detailCard, { backgroundColor: palette.card }]}>
+              <Text style={[styles.detailSectionTitle, { color: palette.text }]}>Vehicle details</Text>
               <Text style={{ color: palette.text }}>Year: {vehicle.manufacturing_year}</Text>
               <Text style={{ color: palette.muted }}>Department: {vehicle.department ?? '—'}</Text>
               <Text style={{ color: palette.muted }}>Driver: {vehicle.assigned_driver ?? '—'}</Text>
               <Text style={{ color: palette.muted }}>Fuel: {vehicle.fuel_type ?? '—'}</Text>
+              <Text style={[styles.detailSectionTitle, { color: palette.text }]}>Mileage records</Text>
+              <Rows rows={mileage} palette={palette} />
+              <Text style={[styles.detailSectionTitle, { color: palette.text }]}>Inspection records</Text>
+              <Rows rows={inspections} palette={palette} />
             </View>
           )}
-          {tab === 'photos' && (
-            <>
-              <Text style={{ color: palette.muted }}>Photos</Text>
-              {canManage && (
-                <>
-                  <Field
-                    label="Local photo URI"
-                    value={photoUri}
-                    onChange={setPhotoUri}
-                    palette={palette}
-                  />
-                  <Button title="Add photo" onPress={() => void addPhoto()} />
-                </>
-              )}
-              {photos.map((p) => (
-                <SignedContent key={p.id} path={String(p.file_path)} />
-              ))}
-            </>
-          )}
+          {tab === 'photos' && <Text style={{ color: palette.muted }}>Photos are shown above.</Text>}
           {tab === 'mileage' && <Rows rows={mileage} palette={palette} />}
           {tab === 'inspections' && <Rows rows={inspections} palette={palette} />}
           {tab === 'maintenance' && <Rows rows={maintenance} palette={palette} />}
@@ -1387,8 +1513,64 @@ const styles = StyleSheet.create({
     gap: 8,
     justifyContent: 'space-between',
   },
+  listToggle: {
+    backgroundColor: '#e8eef7',
+    borderRadius: 10,
+    flexDirection: 'row',
+    marginBottom: 4,
+    padding: 3,
+  },
+  listToggleButton: {
+    borderRadius: 8,
+    flex: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 9,
+  },
+  listToggleActive: { backgroundColor: colors.navy },
   card: { borderRadius: 12, gap: 5, padding: 14 },
   cardTitle: { fontSize: 17, fontWeight: '800' },
+  vehicleListHeader: { alignItems: 'center', flexDirection: 'row', gap: 12 },
+  vehicleTypeIcon: { fontSize: 28, width: 35 },
+  vehicleListCopy: { flex: 1 },
+  plate: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#e8eef7',
+    borderRadius: 4,
+    color: colors.navy,
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    marginTop: 4,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+  },
+  vehicleActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 10 },
+  vehicleDetailTitle: { fontSize: 20, fontWeight: '900' },
+  vehicleDetailPlate: {
+    backgroundColor: '#fff2cc',
+    borderRadius: 5,
+    color: '#765500',
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 1,
+    marginTop: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  vehicleDetailMeta: { alignItems: 'center', flexDirection: 'row', gap: 8 },
+  vehicleDetailIcon: { fontSize: 23 },
+  detailSectionHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  detailSectionTitle: { fontSize: 16, fontWeight: '800' },
+  photoSection: { gap: 4 },
+  photoGallery: { gap: 10 },
+  emptyPhoto: { alignItems: 'center', borderRadius: 12, padding: 28 },
+  photoUploadCard: { borderRadius: 12, gap: 8, padding: 12 },
+  detailCard: { borderRadius: 12, gap: 8, padding: 14 },
   form: { borderRadius: 12, gap: 10, padding: 14 },
   input: { borderRadius: 8, borderWidth: 1, fontSize: 15, padding: 11 },
   button: { backgroundColor: colors.red, borderRadius: 8, marginVertical: 3, padding: 11 },
@@ -1406,5 +1588,6 @@ const styles = StyleSheet.create({
   },
   viewer: { borderRadius: 14, gap: 12, maxHeight: '90%', padding: 18, width: '100%' },
   documentImage: { height: 240, width: '100%' },
+  galleryImage: { borderRadius: 12, height: 210, width: 280 },
   report: { fontFamily: 'monospace', padding: 12 },
 });
