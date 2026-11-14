@@ -39,10 +39,15 @@ jobs:
 
       - name: Download APK
         run: |
-          npx eas-cli@latest build:download --build-id "${{ steps.build.outputs.build_id }}" --non-interactive
-          apk=$(find . -maxdepth 1 -type f -name '*.apk' -print -quit)
+          download_output="$(npx eas-cli@latest build:download --build-id "${{ steps.build.outputs.build_id }}" --non-interactive 2>&1)" || {
+            printf '%s\n' "$download_output"
+            exit 1
+          }
+          printf '%s\n' "$download_output"
+          apk=$(printf '%s\n' "$download_output" | grep -Eo '/[^[:space:]]+\.apk' | tail -n 1)
           test -n "$apk"
-          mv "$apk" riyon-vehicle-management.apk
+          test -f "$apk"
+          cp "$apk" riyon-vehicle-management.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
