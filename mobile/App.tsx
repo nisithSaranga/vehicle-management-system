@@ -30,6 +30,7 @@ export default function App() {
   const [section, setSection] = useState<Section | null>(null);
   const [selected, setSelected] = useState<VehicleRecord | null>(null);
   const [vehicles, setVehicles] = useState<VehicleRecord[]>([]);
+  const [search, setSearch] = useState('');
   const dark = theme === 'dark';
   const palette = useMemo(
     () => ({
@@ -96,48 +97,110 @@ export default function App() {
   return (
     <View style={[styles.root, { backgroundColor: palette.bg }]}>
       <ScrollView contentContainerStyle={styles.content}>
-        <View style={styles.header}>
-          <Image source={logo} style={styles.logo} resizeMode="contain" />
-          <View style={styles.headerCopy}>
-            <Text style={[styles.eyebrow, { color: palette.muted }]}>{config.appName}</Text>
-            <Text style={[styles.title, { color: palette.text }]}>Vehicle Management System</Text>
-            <Text style={[styles.subtitle, { color: palette.muted }]}>
-              Welcome back, {profile.full_name}
-            </Text>
+        <View style={styles.dashboardTopbar}>
+          <Image source={logo} style={styles.dashboardLogo} resizeMode="contain" />
+          <View style={styles.topbarActions}>
+            <Text style={[styles.roleBadge, { color: palette.text }]}>{profile.role}</Text>
+            <Pressable
+              style={styles.themeToggle}
+              onPress={() => setTheme(dark ? 'light' : 'dark')}
+              accessibilityLabel={`Switch to ${dark ? 'light' : 'dark'} mode`}
+            >
+              <Text style={[styles.themeSymbol, { color: palette.text }]}>{dark ? '☼' : '☾'}</Text>
+            </Pressable>
           </View>
         </View>
-        <View style={styles.toolbar}>
-          <Text style={[styles.role, { color: palette.muted }]}>{profile.role}</Text>
-          <Pressable
-            style={styles.themeToggle}
-            onPress={() => setTheme(dark ? 'light' : 'dark')}
-            accessibilityLabel={`Switch to ${dark ? 'light' : 'dark'} mode`}
-          >
-            <Text style={[styles.themeSymbol, { color: palette.text }]}>{dark ? '☼' : '☾'}</Text>
-          </Pressable>
+        <TextInput
+          value={search}
+          onChangeText={setSearch}
+          placeholder="Search vehicles, documents..."
+          placeholderTextColor="#829ab1"
+          style={[styles.searchInput, { backgroundColor: palette.card, color: palette.text }]}
+        />
+        <View style={styles.welcomeBlock}>
+          <Text style={[styles.welcomeTitle, { color: palette.text }]}>
+            Welcome, {profile.full_name.split(' ')[0]}!
+          </Text>
+          <Text style={[styles.subtitle, { color: palette.muted }]}>
+            Here&apos;s your fleet overview for today.
+          </Text>
         </View>
         {error ? <Text style={styles.error}>{error}</Text> : null}
+        <View style={styles.statGrid}>
+          <StatCard label="Total vehicles" value={vehicles.length} icon="🚘" tone="blue" palette={palette} />
+          <StatCard
+            label="Active fleet"
+            value={vehicles.filter((vehicle) => vehicle.status === 'active').length}
+            icon="✓"
+            tone="green"
+            palette={palette}
+          />
+          <StatCard
+            label="Archived"
+            value={vehicles.filter((vehicle) => vehicle.status !== 'active').length}
+            icon="!"
+            tone="orange"
+            palette={palette}
+          />
+        </View>
+        <View style={[styles.complianceCard, { backgroundColor: colors.navy }]}>
+          <View style={styles.complianceHeader}>
+            <Text style={styles.complianceIcon}>✓</Text>
+            <Text style={styles.complianceTitle}>Fleet overview</Text>
+            <Text style={styles.complianceLink}>Riyon</Text>
+          </View>
+          <Text style={styles.complianceDescription}>
+            Keep vehicles, inspections, maintenance, and documents in one place.
+          </Text>
+          <View style={styles.progressTrack}>
+            <View
+              style={[
+                styles.progressFill,
+                {
+                  width: `${vehicles.length ? Math.round((vehicles.filter((v) => v.status === 'active').length / vehicles.length) * 100) : 0}%`,
+                },
+              ]}
+            />
+          </View>
+          <Text style={styles.progressLabel}>
+            {vehicles.length
+              ? `${Math.round((vehicles.filter((v) => v.status === 'active').length / vehicles.length) * 100)}% of your fleet is active`
+              : 'Add your first vehicle to start tracking'}
+          </Text>
+        </View>
+        <View style={styles.sectionHeading}>
+          <Text style={[styles.sectionTitle, { color: palette.text }]}>Fleet management</Text>
+          <Text style={[styles.sectionHint, { color: palette.muted }]}>Quick access</Text>
+        </View>
         <View style={styles.tiles}>
           {(
             [
-              ['fleet', 'Vehicles', 'Register, archive, restore'],
-              ['operations', 'Weekly records', 'Mileage and inspections'],
-              ['compliance', 'Compliance', 'Licences, tests, insurance'],
-              ['maintenance', 'Maintenance', 'Service and repair history'],
-              ['documents', 'Documents', 'Secure vehicle documents'],
-              ['reports', 'Reports', 'Structured vehicle report'],
-            ] as Array<[Section, string, string]>
-          ).map(([id, title, description], index) => (
+              ['fleet', 'Vehicles', 'Register, archive, restore', '🚘'],
+              ['operations', 'Inspections', 'Mileage and weekly checks', '✓'],
+              ['compliance', 'Compliance', 'Licences, tests, insurance', '▣'],
+              ['maintenance', 'Maintenance', 'Service and repair history', '⚒'],
+              ['documents', 'Documents', 'Secure vehicle documents', '▤'],
+              ['reports', 'Reports', 'Structured vehicle report', '▥'],
+            ] as Array<[Section, string, string, string]>
+          )
+            .filter(([, title, description]) =>
+              `${title} ${description}`.toLowerCase().includes(search.toLowerCase()),
+            )
+            .map(([id, title, description, icon], index) => (
             <Pressable
               key={id}
               style={[styles.tile, { backgroundColor: palette.card }]}
               onPress={() => setSection(id)}
             >
-              <Text style={styles.tileNumber}>{String(index + 1).padStart(2, '0')}</Text>
+              <View style={styles.tileTopline}>
+                <Text style={styles.tileIcon}>{icon}</Text>
+                <Text style={styles.tileNumber}>{String(index + 1).padStart(2, '0')}</Text>
+              </View>
               <Text style={[styles.tileTitle, { color: palette.text }]}>{title}</Text>
               <Text style={[styles.tileText, { color: palette.muted }]}>{description}</Text>
+              <Text style={styles.tileArrow}>View details  →</Text>
             </Pressable>
-          ))}
+            ))}
         </View>
         <Pressable style={styles.signOut} onPress={() => void supabase.auth.signOut()}>
           <Text style={styles.signOutText}>Sign out</Text>
@@ -201,6 +264,37 @@ export default function App() {
         palette={palette}
       />
       <StatusBar style={dark ? 'light' : 'dark'} />
+    </View>
+  );
+}
+
+function StatCard({
+  label,
+  value,
+  icon,
+  tone,
+  palette,
+}: {
+  label: string;
+  value: number;
+  icon: string;
+  tone: 'blue' | 'green' | 'orange';
+  palette: { card: string; text: string; muted: string };
+}) {
+  return (
+    <View style={[styles.statCard, { backgroundColor: palette.card }]}>
+      <View
+        style={[
+          styles.statIcon,
+          {
+            backgroundColor: { blue: '#e1efff', green: '#d9f7e7', orange: '#fff0d4' }[tone],
+          },
+        ]}
+      >
+        <Text style={styles.statIconText}>{icon}</Text>
+      </View>
+      <Text style={[styles.statLabel, { color: palette.muted }]}>{label}</Text>
+      <Text style={[styles.statValue, { color: palette.text }]}>{value}</Text>
     </View>
   );
 }
@@ -1141,7 +1235,7 @@ function Reports({
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
-  content: { padding: 20, paddingTop: 55, paddingBottom: 30 },
+  content: { padding: 16, paddingTop: 52, paddingBottom: 30 },
   centered: { alignItems: 'center', flex: 1, justifyContent: 'center', padding: 24 },
   header: { alignItems: 'center', flexDirection: 'row', gap: 12 },
   headerCopy: { flex: 1 },
@@ -1156,6 +1250,22 @@ const styles = StyleSheet.create({
     marginTop: 18,
   },
   role: { fontWeight: '700', textTransform: 'capitalize' },
+  dashboardTopbar: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  dashboardLogo: { height: 52, width: 118 },
+  topbarActions: { alignItems: 'center', flexDirection: 'row', gap: 10 },
+  roleBadge: {
+    backgroundColor: '#e8eefb',
+    borderRadius: 12,
+    fontSize: 11,
+    fontWeight: '800',
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    textTransform: 'capitalize',
+  },
   themeToggle: {
     alignItems: 'center',
     borderColor: colors.border,
@@ -1166,18 +1276,86 @@ const styles = StyleSheet.create({
     width: 36,
   },
   themeSymbol: { fontSize: 20, lineHeight: 24 },
-  tiles: { gap: 12, marginTop: 20 },
+  searchInput: {
+    borderColor: '#e1e8f2',
+    borderRadius: 14,
+    borderWidth: 1,
+    fontSize: 14,
+    marginTop: 15,
+    paddingHorizontal: 15,
+    paddingVertical: 12,
+  },
+  welcomeBlock: { marginBottom: 16, marginTop: 22 },
+  welcomeTitle: { fontSize: 28, fontWeight: '900' },
+  statGrid: { flexDirection: 'row', gap: 9, marginBottom: 14 },
+  statCard: {
+    borderColor: '#e1e8f2',
+    borderRadius: 14,
+    borderWidth: 1,
+    flex: 1,
+    minHeight: 132,
+    padding: 12,
+  },
+  statIcon: {
+    alignItems: 'center',
+    borderRadius: 10,
+    height: 34,
+    justifyContent: 'center',
+    marginBottom: 10,
+    width: 34,
+  },
+  statIconText: { color: colors.navy, fontSize: 17, fontWeight: '900' },
+  statLabel: { fontSize: 11, fontWeight: '700' },
+  statValue: { fontSize: 27, fontWeight: '900', marginTop: 4 },
+  complianceCard: { borderRadius: 17, marginBottom: 21, padding: 17 },
+  complianceHeader: { alignItems: 'center', flexDirection: 'row', gap: 9 },
+  complianceIcon: {
+    backgroundColor: '#33c477',
+    borderRadius: 12,
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '900',
+    overflow: 'hidden',
+    padding: 5,
+  },
+  complianceTitle: { color: '#fff', flex: 1, fontSize: 16, fontWeight: '800' },
+  complianceLink: { color: '#a9c5ff', fontSize: 12, fontWeight: '700' },
+  complianceDescription: { color: '#cfdbf4', fontSize: 12, lineHeight: 18, marginTop: 13 },
+  progressTrack: {
+    backgroundColor: '#304d83',
+    borderRadius: 4,
+    height: 7,
+    marginTop: 16,
+    overflow: 'hidden',
+  },
+  progressFill: { backgroundColor: '#38d486', borderRadius: 4, height: '100%' },
+  progressLabel: { color: '#dce7ff', fontSize: 11, marginTop: 8 },
+  sectionHeading: {
+    alignItems: 'baseline',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  sectionTitle: { fontSize: 19, fontWeight: '900' },
+  sectionHint: { fontSize: 12, fontWeight: '600' },
+  tiles: { gap: 10 },
   tile: {
-    borderRadius: 16,
+    borderColor: '#e1e8f2',
+    borderRadius: 15,
+    borderWidth: 1,
     elevation: 2,
-    padding: 18,
+    minHeight: 145,
+    padding: 15,
     shadowColor: '#000',
     shadowOpacity: 0.08,
     shadowRadius: 5,
   },
+  tileTopline: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' },
+  tileIcon: { fontSize: 24 },
   tileNumber: { color: colors.red, fontWeight: '800' },
-  tileTitle: { fontSize: 19, fontWeight: '800', marginTop: 6 },
+  tileTitle: { fontSize: 18, fontWeight: '800', marginTop: 11 },
   tileText: { fontSize: 14, marginTop: 5 },
+  tileArrow: { color: '#2870d8', fontSize: 12, fontWeight: '800', marginTop: 12 },
   signOut: {
     alignSelf: 'center',
     borderColor: colors.border,
