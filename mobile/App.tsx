@@ -9,6 +9,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  type TextInputProps,
   View,
 } from 'react-native';
 import type { Session } from '@supabase/supabase-js';
@@ -360,12 +361,14 @@ function Field({
   onChange,
   palette,
   secure = false,
+  keyboardType,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   palette: { text: string; card: string };
   secure?: boolean;
+  keyboardType?: TextInputProps['keyboardType'];
 }) {
   return (
     <TextInput
@@ -373,6 +376,7 @@ function Field({
       placeholderTextColor="#829ab1"
       autoCapitalize="none"
       secureTextEntry={secure}
+      keyboardType={keyboardType}
       style={[styles.input, { color: palette.text, borderColor: colors.border }]}
       value={value}
       onChangeText={onChange}
@@ -657,80 +661,233 @@ function Operations({
   palette: { card: string; text: string; muted: string };
 }) {
   const [vehicleId, setVehicleId] = useState('');
+  const [mode, setMode] = useState<'mileage' | 'inspection' | null>(null);
+  const [dropdownOpen, setDropdownOpen] = useState(false);
   const [odometer, setOdometer] = useState('');
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [condition, setCondition] = useState('Good');
   const [remarks, setRemarks] = useState('');
-  const [rows, setRows] = useState<RecordRow[]>([]);
-  const load = async () => {
-    const { data } = await supabase
-      .from('mileage_records')
-      .select('id, vehicle_id, odometer_reading, reading_date, notes')
-      .order('reading_date', { ascending: false })
-      .limit(50);
-    setRows((data ?? []) as RecordRow[]);
+  const [mileageRows, setMileageRows] = useState<RecordRow[]>([]);
+  const [inspectionRows, setInspectionRows] = useState<RecordRow[]>([]);
+  const selectedVehicle = vehicles.find((vehicle) => vehicle.id === vehicleId);
+  const loadHistory = async () => {
+    if (!vehicleId) {
+      setMileageRows([]);
+      setInspectionRows([]);
+      return;
+    }
+    const [mileage, inspections] = await Promise.all([
+      supabase
+        .from('mileage_records')
+        .select('id, vehicle_id, odometer_reading, reading_date, notes')
+        .eq('vehicle_id', vehicleId)
+        .order('reading_date', { ascending: false })
+        .limit(5),
+      supabase
+        .from('inspections')
+        .select('id, vehicle_id, inspection_date, overall_condition, remarks')
+        .eq('vehicle_id', vehicleId)
+        .order('inspection_date', { ascending: false })
+        .limit(5),
+    ]);
+    if (mileage.error || inspections.error) {
+      Alert.alert(
+        'Unable to load records',
+        mileage.error?.message ?? inspections.error?.message ?? 'Please try again.',
+      );
+      return;
+    }
+    setMileageRows((mileage.data ?? []) as RecordRow[]);
+    setInspectionRows((inspections.data ?? []) as RecordRow[]);
   };
   useEffect(() => {
-    void load();
-  }, []);
+    void loadHistory();
+  }, [vehicleId]);
   const saveMileage = async () => {
     if (!canManage) return;
+    const reading = Number.parseFloat(odometer);
+    if (!vehicleId || !date || !Number.isFinite(reading) || reading < 0) {
+      Alert.alert('Required', 'Select a vehicle, enter a valid odometer reading, and choose a date.');
+      return;
+    }
     const { error } = await supabase.from('mileage_records').insert({
       vehicle_id: vehicleId,
       recorded_by: userId,
-      odometer_reading: Number(odometer),
+      odometer_reading: reading,
       reading_date: date,
       notes: remarks,
     });
     if (error) Alert.alert('Unable to save mileage', error.message);
     else {
       setOdometer('');
-      await load();
+      setRemarks('');
+      await loadHistory();
+      Alert.alert('Saved', 'Mileage reading added.');
     }
   };
   const saveInspection = async () => {
     if (!canManage) return;
+    if (!vehicleId || !date || !condition) {
+      Alert.alert('Required', 'Select a vehicle, choose a date, and enter the condition.');
+      return;
+    }
     const { error } = await supabase.from('inspections').insert({
       vehicle_id: vehicleId,
       inspector_id: userId,
       inspection_date: date,
       week_start_date: date,
-      odometer_reading: Number(odometer),
       overall_condition: condition,
       remarks,
     });
     if (error) Alert.alert('Unable to save inspection', error.message);
-    else Alert.alert('Saved', 'Weekly inspection recorded.');
+    else {
+      setRemarks('');
+      await loadHistory();
+      Alert.alert('Saved', 'Inspection recorded.');
+    }
   };
   return (
     <Panel>
-      <Heading palette={palette}>Mileage and inspections</Heading>
+      <View style={styles.operationsIntro}>
+        <Heading palette={palette}>Vehicle updates</Heading>
+        <Text style={{ color: palette.muted }}>
+          Choose a vehicle first, then select the record you want to add.
+        </Text>
+      </View>
       {!canManage && <Text style={{ color: palette.muted }}>Management access is read-only.</Text>}
-      <VehiclePicker
-        vehicles={vehicles}
-        value={vehicleId}
-        onChange={setVehicleId}
-        palette={palette}
-      />
-      <Field label="Date (YYYY-MM-DD)" value={date} onChange={setDate} palette={palette} />
-      <Field label="Odometer reading" value={odometer} onChange={setOdometer} palette={palette} />
-      <Field label="Condition" value={condition} onChange={setCondition} palette={palette} />
-      <Field label="Remarks" value={remarks} onChange={setRemarks} palette={palette} />
-      {canManage && (
-        <View style={styles.row}>
-          <Button title="Save mileage" onPress={() => void saveMileage()} />
-          <Button title="Save inspection" onPress={() => void saveInspection()} />
+      <View style={styles.dropdownWrap}>
+        <Text style={[styles.fieldLabel, { color: palette.muted }]}>Vehicle</Text>
+        <Pressable
+          style={[styles.dropdownButton, { backgroundColor: palette.card }]}
+          onPress={() => setDropdownOpen(!dropdownOpen)}
+        >
+          <Text style={{ color: selectedVehicle ? palette.text : palette.muted }}>
+            {selectedVehicle
+              ? `${vehicleIcon(selectedVehicle.vehicle_type)}  ${selectedVehicle.make} ${selectedVehicle.model} · ${selectedVehicle.registration_number}`
+              : 'Select a registered vehicle'}
+          </Text>
+          <Text style={{ color: palette.muted }}>{dropdownOpen ? '⌃' : '⌄'}</Text>
+        </Pressable>
+        {dropdownOpen && (
+          <View style={[styles.dropdownList, { backgroundColor: palette.card }]}>
+            {vehicles.map((vehicle) => (
+              <Pressable
+                key={vehicle.id}
+                style={styles.dropdownOption}
+                onPress={() => {
+                  setVehicleId(vehicle.id);
+                  setMode(null);
+                  setDropdownOpen(false);
+                }}
+              >
+                <Text style={styles.vehicleTypeIcon}>{vehicleIcon(vehicle.vehicle_type)}</Text>
+                <View style={styles.vehicleListCopy}>
+                  <Text style={{ color: palette.text, fontWeight: '800' }}>
+                    {vehicle.make} {vehicle.model}
+                  </Text>
+                  <Text style={{ color: palette.muted }}>{vehicle.registration_number}</Text>
+                </View>
+              </Pressable>
+            ))}
+          </View>
+        )}
+      </View>
+      {selectedVehicle && (
+        <View style={styles.updateChoiceRow}>
+          <Pressable
+            style={[styles.updateChoice, mode === 'mileage' && styles.updateChoiceMileage]}
+            onPress={() => setMode('mileage')}
+          >
+            <Text style={styles.updateChoiceIcon}>◷</Text>
+            <Text style={[styles.updateChoiceTitle, { color: mode === 'mileage' ? '#fff' : palette.text }]}>
+              Mileage update
+            </Text>
+            <Text style={{ color: mode === 'mileage' ? '#dce7ff' : palette.muted }}>
+              Record distance
+            </Text>
+          </Pressable>
+          <Pressable
+            style={[styles.updateChoice, mode === 'inspection' && styles.updateChoiceInspection]}
+            onPress={() => setMode('inspection')}
+          >
+            <Text style={styles.updateChoiceIcon}>✓</Text>
+            <Text
+              style={[styles.updateChoiceTitle, { color: mode === 'inspection' ? '#fff' : palette.text }]}
+            >
+              Inspection update
+            </Text>
+            <Text style={{ color: mode === 'inspection' ? '#dce7ff' : palette.muted }}>
+              Check condition
+            </Text>
+          </Pressable>
         </View>
       )}
-      <Heading palette={palette}>Recent mileage</Heading>
-      {rows.map((r) => (
-        <View key={r.id} style={[styles.card, { backgroundColor: palette.card }]}>
-          <Text style={{ color: palette.text }}>
-            {String(r.reading_date)} · {String(r.odometer_reading)} km
+      {mode && (
+        <View style={[styles.updateForm, { backgroundColor: palette.card }]}>
+          <Text style={[styles.detailSectionTitle, { color: palette.text }]}>
+            {mode === 'mileage' ? 'Mileage details' : 'Inspection details'}
           </Text>
-          <Text style={{ color: palette.muted }}>{String(r.notes ?? '')}</Text>
+          <Field label="Date (YYYY-MM-DD)" value={date} onChange={setDate} palette={palette} />
+          {mode === 'mileage' ? (
+            <Field
+              label="Odometer reading (km)"
+              value={odometer}
+              onChange={setOdometer}
+              palette={palette}
+              keyboardType="decimal-pad"
+            />
+          ) : (
+            <Field label="Overall condition" value={condition} onChange={setCondition} palette={palette} />
+          )}
+          <Field label="Remarks" value={remarks} onChange={setRemarks} palette={palette} />
+          {canManage && (
+            <Button
+              title={mode === 'mileage' ? 'Save mileage' : 'Save inspection'}
+              onPress={() => void (mode === 'mileage' ? saveMileage() : saveInspection())}
+            />
+          )}
         </View>
-      ))}
+      )}
+      {selectedVehicle && (
+        <>
+          <View style={styles.historyHeader}>
+            <Text style={[styles.detailSectionTitle, { color: palette.text }]}>Recent mileage</Text>
+            <Text style={[styles.sectionHint, { color: palette.muted }]}>Last 5 readings</Text>
+          </View>
+          {mileageRows.length ? (
+            mileageRows.map((r) => (
+              <View key={r.id} style={[styles.historyCard, { backgroundColor: palette.card }]}>
+                <Text style={[styles.historyValue, { color: palette.text }]}>
+                  {String(r.odometer_reading)} km
+                </Text>
+                <Text style={{ color: palette.muted }}>{String(r.reading_date)}</Text>
+                {r.notes ? <Text style={{ color: palette.muted }}>{String(r.notes)}</Text> : null}
+              </View>
+            ))
+          ) : (
+            <Text style={{ color: palette.muted }}>No mileage readings for this vehicle.</Text>
+          )}
+          <View style={styles.historyHeader}>
+            <Text style={[styles.detailSectionTitle, { color: palette.text }]}>
+              Recent inspections
+            </Text>
+            <Text style={[styles.sectionHint, { color: palette.muted }]}>Last 5 inspections</Text>
+          </View>
+          {inspectionRows.length ? (
+            inspectionRows.map((r) => (
+              <View key={r.id} style={[styles.historyCard, { backgroundColor: palette.card }]}>
+                <Text style={[styles.historyValue, { color: palette.text }]}>
+                  {String(r.overall_condition)}
+                </Text>
+                <Text style={{ color: palette.muted }}>{String(r.inspection_date)}</Text>
+                {r.remarks ? <Text style={{ color: palette.muted }}>{String(r.remarks)}</Text> : null}
+              </View>
+            ))
+          ) : (
+            <Text style={{ color: palette.muted }}>No inspections for this vehicle.</Text>
+          )}
+        </>
+      )}
     </Panel>
   );
 }
@@ -1571,6 +1728,61 @@ const styles = StyleSheet.create({
   emptyPhoto: { alignItems: 'center', borderRadius: 12, padding: 28 },
   photoUploadCard: { borderRadius: 12, gap: 8, padding: 12 },
   detailCard: { borderRadius: 12, gap: 8, padding: 14 },
+  operationsIntro: { gap: 4 },
+  fieldLabel: { fontSize: 12, fontWeight: '700', marginBottom: 5 },
+  dropdownWrap: { position: 'relative', zIndex: 2 },
+  dropdownButton: {
+    alignItems: 'center',
+    borderColor: colors.border,
+    borderRadius: 10,
+    borderWidth: 1,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 48,
+    paddingHorizontal: 13,
+  },
+  dropdownList: {
+    borderColor: colors.border,
+    borderRadius: 10,
+    borderWidth: 1,
+    elevation: 4,
+    marginTop: 4,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.12,
+    shadowRadius: 5,
+  },
+  dropdownOption: {
+    alignItems: 'center',
+    borderBottomColor: colors.border,
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    gap: 10,
+    padding: 12,
+  },
+  updateChoiceRow: { flexDirection: 'row', gap: 9, zIndex: 1 },
+  updateChoice: {
+    backgroundColor: '#eef3fa',
+    borderColor: '#dce5f1',
+    borderRadius: 12,
+    borderWidth: 1,
+    flex: 1,
+    gap: 4,
+    padding: 12,
+  },
+  updateChoiceMileage: { backgroundColor: '#2367c8', borderColor: '#2367c8' },
+  updateChoiceInspection: { backgroundColor: '#16875a', borderColor: '#16875a' },
+  updateChoiceIcon: { fontSize: 22, marginBottom: 4 },
+  updateChoiceTitle: { fontSize: 14, fontWeight: '900' },
+  updateForm: { borderRadius: 13, gap: 10, padding: 14, zIndex: 1 },
+  historyHeader: {
+    alignItems: 'baseline',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 7,
+  },
+  historyCard: { borderLeftColor: colors.red, borderLeftWidth: 4, borderRadius: 10, gap: 4, padding: 12 },
+  historyValue: { fontSize: 16, fontWeight: '900' },
   form: { borderRadius: 12, gap: 10, padding: 14 },
   input: { borderRadius: 8, borderWidth: 1, fontSize: 15, padding: 11 },
   button: { backgroundColor: colors.red, borderRadius: 8, marginVertical: 3, padding: 11 },
