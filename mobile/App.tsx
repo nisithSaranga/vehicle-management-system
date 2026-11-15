@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { StatusBar } from 'expo-status-bar';
+import * as ImagePicker from 'expo-image-picker';
 import {
   Alert,
   Image,
@@ -18,9 +19,23 @@ import { supabase, type Profile } from './src/lib/supabase';
 
 const config: AppConfig = { appName: 'Riyon International Pvt Ltd', version: '0.1.0' };
 const logo = require('./assets/riyon-logo.png');
-type Section = 'fleet' | 'operations' | 'compliance' | 'maintenance' | 'documents' | 'reports';
+type Section = 'fleet' | 'operations' | 'compliance' | 'maintenance' | 'reports';
 type RecordRow = Record<string, unknown> & { id: string; vehicle_id: string };
 const colors = { red: '#b42318', navy: '#102a43', muted: '#52606d', border: '#d9e2ec' };
+
+async function choosePhoto(): Promise<string | null> {
+  const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+  if (!permission.granted) {
+    Alert.alert('Permission required', 'Allow photo access to attach a certificate or receipt.');
+    return null;
+  }
+  const result = await ImagePicker.launchImageLibraryAsync({
+    mediaTypes: ['images'],
+    allowsEditing: true,
+    quality: 0.9,
+  });
+  return result.canceled ? null : result.assets[0]?.uri ?? null;
+}
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -114,7 +129,7 @@ export default function App() {
         <TextInput
           value={search}
           onChangeText={setSearch}
-          placeholder="Search vehicles, documents..."
+          placeholder="Search vehicles, compliance, maintenance..."
           placeholderTextColor="#829ab1"
           style={[styles.searchInput, { backgroundColor: palette.card, color: palette.text }]}
         />
@@ -151,7 +166,7 @@ export default function App() {
             <Text style={styles.complianceLink}>Riyon</Text>
           </View>
           <Text style={styles.complianceDescription}>
-            Keep vehicles, inspections, maintenance, and documents in one place.
+            Keep vehicles, inspections, compliance, and maintenance in one place.
           </Text>
           <View style={styles.progressTrack}>
             <View
@@ -180,7 +195,6 @@ export default function App() {
               ['operations', 'Inspections', 'Mileage and weekly checks', '✓'],
               ['compliance', 'Compliance', 'Licences, tests, insurance', '▣'],
               ['maintenance', 'Maintenance', 'Service and repair history', '⚒'],
-              ['documents', 'Documents', 'Secure vehicle documents', '▤'],
               ['reports', 'Reports', 'Structured vehicle report', '▥'],
             ] as Array<[Section, string, string, string]>
           )
@@ -240,18 +254,14 @@ export default function App() {
             />
           )}
           {section === 'compliance' && (
-            <Compliance vehicles={vehicles} canManage={!!canManage} palette={palette} />
+            <Compliance
+              vehicles={vehicles}
+              canManage={!!canManage}
+              palette={palette}
+            />
           )}
           {section === 'maintenance' && (
             <Maintenance vehicles={vehicles} canManage={!!canManage} palette={palette} />
-          )}
-          {section === 'documents' && (
-            <Documents
-              vehicles={vehicles}
-              canManage={!!canManage}
-              userId={session.user.id}
-              palette={palette}
-            />
           )}
           {section === 'reports' && <Reports vehicles={vehicles} palette={palette} />}
         </View>
@@ -306,7 +316,6 @@ function sectionTitle(section: Section | null) {
     operations: 'Weekly records',
     compliance: 'Compliance',
     maintenance: 'Maintenance',
-    documents: 'Documents',
     reports: 'Reports',
   }[section ?? 'fleet'];
 }
@@ -474,13 +483,26 @@ function Fleet({
           style: 'destructive',
           onPress: async () => {
             setBusy(true);
-            const { data: documents } = await supabase
-              .from('vehicle_documents')
-              .select('file_path')
-              .eq('vehicle_id', v.id);
-            const paths = (documents ?? [])
-              .map((document) => document.file_path)
-              .filter((path): path is string => !!path);
+            const [{ data: documents }, { data: compliance }, { data: maintenance }] =
+              await Promise.all([
+                supabase
+                  .from('vehicle_documents')
+                  .select('file_path')
+                  .eq('vehicle_id', v.id),
+                supabase
+                  .from('compliance_records')
+                  .select('file_path')
+                  .eq('vehicle_id', v.id),
+                supabase
+                  .from('maintenance_records')
+                  .select('document_path')
+                  .eq('vehicle_id', v.id),
+              ]);
+            const paths = [
+              ...(documents ?? []).map((document) => document.file_path),
+              ...(compliance ?? []).map((record) => record.file_path),
+              ...(maintenance ?? []).map((record) => record.document_path),
+            ].filter((path): path is string => !!path);
             if (paths.length) await supabase.storage.from('vehicle-documents').remove(paths);
             const dependentTables = [
               'reminder_logs',
@@ -906,44 +928,83 @@ function Compliance({
   const [issue, setIssue] = useState('');
   const [expiry, setExpiry] = useState('');
   const [reference, setReference] = useState('');
+  const [fileUri, setFileUri] = useState('');
   const [rows, setRows] = useState<RecordRow[]>([]);
+  const [view, setView] = useState<string | null>(null);
   const load = async () => {
     const { data } = await supabase
       .from('compliance_records')
-      .select('id, vehicle_id, compliance_type, issue_date, expiry_date, reference_number, status')
+      .select(
+        'id, vehicle_id, compliance_type, issue_date, expiry_date, reference_number, status, file_path',
+      )
       .order('expiry_date');
     setRows((data ?? []) as RecordRow[]);
   };
   useEffect(() => {
     void load();
   }, []);
+  useEffect(() => {
+    const existing = rows.find(
+      (row) => row.vehicle_id === vehicleId && row.compliance_type === type,
+    );
+    setIssue(String(existing?.issue_date ?? ''));
+    setExpiry(String(existing?.expiry_date ?? ''));
+    setReference(String(existing?.reference_number ?? ''));
+    setFileUri('');
+  }, [vehicleId, type, rows]);
   const save = async () => {
-    if (!canManage) return;
+    if (!canManage || !vehicleId) {
+      Alert.alert('Required', 'Select a vehicle before saving compliance.');
+      return;
+    }
     const { data: existing } = await supabase
       .from('compliance_records')
-      .select('id')
+      .select('id, file_path')
       .eq('vehicle_id', vehicleId)
       .eq('compliance_type', type)
       .maybeSingle();
-    if (existing)
-      return Alert.alert('Duplicate record', `${type} already exists for this vehicle.`);
-    const { error } = await supabase.from('compliance_records').insert({
-      vehicle_id: vehicleId,
-      compliance_type: type,
-      issue_date: issue || null,
-      expiry_date: expiry || null,
-      reference_number: reference || null,
-      status: 'active',
-    });
-    if (error) Alert.alert('Unable to save compliance', error.message);
-    else {
+    let uploadedPath: string | null = null;
+    try {
+      if (fileUri) {
+        uploadedPath = `${vehicleId}/compliance-${Date.now()}-${fileUri.split('/').pop() ?? 'certificate'}`;
+        const response = await fetch(fileUri);
+        const blob = await response.blob();
+        const { error: uploadError } = await supabase.storage
+          .from('vehicle-documents')
+          .upload(uploadedPath, blob, { upsert: false });
+        if (uploadError) throw uploadError;
+      }
+      const values = {
+        vehicle_id: vehicleId,
+        compliance_type: type,
+        issue_date: issue || null,
+        expiry_date: expiry || null,
+        reference_number: reference || null,
+        status: expiry && expiry < new Date().toISOString().slice(0, 10) ? 'expired' : 'active',
+        ...(uploadedPath ? { file_path: uploadedPath } : {}),
+      };
+      const result = existing
+        ? await supabase.from('compliance_records').update(values).eq('id', existing.id)
+        : await supabase.from('compliance_records').insert(values);
+      if (result.error) throw result.error;
+      if (uploadedPath && existing?.file_path) {
+        await supabase.storage.from('vehicle-documents').remove([String(existing.file_path)]);
+      }
+      setFileUri('');
       await load();
-      Alert.alert('Saved', 'Compliance record added.');
+      Alert.alert('Saved', `${type} compliance record saved.`);
+    } catch (e) {
+      if (uploadedPath) await supabase.storage.from('vehicle-documents').remove([uploadedPath]);
+      Alert.alert('Unable to save compliance', e instanceof Error ? e.message : 'Try again.');
     }
   };
   return (
     <Panel>
-      <Heading palette={palette}>Compliance records</Heading>
+      <Heading palette={palette}>Compliance certificates</Heading>
+      <Text style={{ color: palette.muted }}>
+        Keep the revenue licence, emission test, and insurance certificate for each vehicle in one
+        place.
+      </Text>
       {!canManage && <Text style={{ color: palette.muted }}>Management access is read-only.</Text>}
       <VehiclePicker
         vehicles={vehicles}
@@ -965,17 +1026,41 @@ function Compliance({
       <Field label="Issue date" value={issue} onChange={setIssue} palette={palette} />
       <Field label="Expiry date" value={expiry} onChange={setExpiry} palette={palette} />
       <Field label="Reference number" value={reference} onChange={setReference} palette={palette} />
-      {canManage && <Button title="Save compliance" onPress={() => void save()} />}
+      {canManage && (
+        <>
+          <Button
+            title={fileUri ? 'Replace certificate photo' : 'Choose certificate photo'}
+            onPress={() => void choosePhoto().then((uri) => uri && setFileUri(uri))}
+          />
+          {fileUri ? <Text style={{ color: palette.muted }}>Certificate photo selected.</Text> : null}
+          <Button title="Save compliance certificate" onPress={() => void save()} />
+        </>
+      )}
       {rows.map((r) => (
         <View key={r.id} style={[styles.card, { backgroundColor: palette.card }]}>
           <Text style={{ color: palette.text }}>
-            {String(r.compliance_type)} · {String(r.expiry_date ?? 'No expiry')}
+            {String(r.compliance_type)} · {String(r.expiry_date ?? 'No expiry')} ·{' '}
+            {String(r.status)}
           </Text>
           <Text style={{ color: palette.muted }}>
-            {String(r.reference_number ?? '')} · {String(r.status)}
+            {String(r.reference_number ?? 'No reference')}
           </Text>
+          {r.file_path ? (
+            <Button title="View certificate" onPress={() => setView(String(r.file_path))} />
+          ) : (
+            <Text style={{ color: palette.muted }}>No certificate uploaded.</Text>
+          )}
         </View>
       ))}
+      <Modal visible={!!view} transparent animationType="fade" onRequestClose={() => setView(null)}>
+        <View style={styles.overlay}>
+          <View style={[styles.viewer, { backgroundColor: palette.card }]}>
+            <Heading palette={palette}>Compliance certificate</Heading>
+            {view ? <SignedContent path={view} /> : null}
+            <Button title="Close" onPress={() => setView(null)} />
+          </View>
+        </View>
+      </Modal>
     </Panel>
   );
 }
@@ -997,12 +1082,14 @@ function Maintenance({
   const [serviceStation, setServiceStation] = useState('');
   const [provider, setProvider] = useState('');
   const [cost, setCost] = useState('');
+  const [receiptUri, setReceiptUri] = useState('');
   const [rows, setRows] = useState<RecordRow[]>([]);
+  const [view, setView] = useState<string | null>(null);
   const load = async () => {
     const { data } = await supabase
       .from('maintenance_records')
       .select(
-        'id, vehicle_id, service_date, odometer_reading, service_type, description, service_station, provider, cost',
+        'id, vehicle_id, service_date, odometer_reading, service_type, description, service_station, provider, cost, document_path',
       )
       .order('service_date', { ascending: false });
     setRows((data ?? []) as RecordRow[]);
@@ -1016,18 +1103,36 @@ function Maintenance({
       Alert.alert('Required', 'Vehicle, date, odometer, and service station / garage are required.');
       return;
     }
-    const { error } = await supabase.from('maintenance_records').insert({
-      vehicle_id: vehicleId,
-      service_date: date,
-      odometer_reading: Number(odometer),
-      service_type: serviceType,
-      description,
-      service_station: serviceStation,
-      provider,
-      cost: cost ? Number(cost) : null,
-    });
-    if (error) Alert.alert('Unable to save maintenance', error.message);
-    else await load();
+    let receiptPath: string | null = null;
+    try {
+      if (receiptUri) {
+        receiptPath = `${vehicleId}/maintenance-${Date.now()}-${receiptUri.split('/').pop() ?? 'receipt'}`;
+        const response = await fetch(receiptUri);
+        const blob = await response.blob();
+        const { error: uploadError } = await supabase.storage
+          .from('vehicle-documents')
+          .upload(receiptPath, blob, { upsert: false });
+        if (uploadError) throw uploadError;
+      }
+      const { error } = await supabase.from('maintenance_records').insert({
+        vehicle_id: vehicleId,
+        service_date: date,
+        odometer_reading: Number(odometer),
+        service_type: serviceType,
+        description,
+        service_station: serviceStation,
+        provider,
+        cost: cost ? Number(cost) : null,
+        document_path: receiptPath,
+      });
+      if (error) throw error;
+      setReceiptUri('');
+      await load();
+      Alert.alert('Saved', 'Maintenance record added.');
+    } catch (e) {
+      if (receiptPath) await supabase.storage.from('vehicle-documents').remove([receiptPath]);
+      Alert.alert('Unable to save maintenance', e instanceof Error ? e.message : 'Try again.');
+    }
   };
   return (
     <Panel>
@@ -1056,6 +1161,15 @@ function Maintenance({
           palette={palette}
         />
       ))}
+      {canManage && (
+        <>
+          <Button
+            title={receiptUri ? 'Replace receipt photo' : 'Choose receipt photo'}
+            onPress={() => void choosePhoto().then((uri) => uri && setReceiptUri(uri))}
+          />
+          {receiptUri ? <Text style={{ color: palette.muted }}>Receipt photo selected.</Text> : null}
+        </>
+      )}
       {canManage && <Button title="Save maintenance" onPress={() => void save()} />}
       {rows.map((r) => (
         <View key={r.id} style={[styles.card, { backgroundColor: palette.card }]}>
@@ -1066,154 +1180,18 @@ function Maintenance({
             {String(r.service_station ?? '')} · {String(r.provider ?? '')} ·{' '}
             {String(r.cost ?? '')}
           </Text>
-        </View>
-      ))}
-    </Panel>
-  );
-}
-
-function Documents({
-  vehicles,
-  canManage,
-  userId,
-  palette,
-}: {
-  vehicles: VehicleRecord[];
-  canManage: boolean;
-  userId: string;
-  palette: { card: string; text: string; muted: string };
-}) {
-  const [vehicleId, setVehicleId] = useState('');
-  const [type, setType] = useState('Revenue Licence');
-  const [path, setPath] = useState('');
-  const [rows, setRows] = useState<RecordRow[]>([]);
-  const [view, setView] = useState<RecordRow | null>(null);
-  const load = async () => {
-    const { data } = await supabase
-      .from('vehicle_documents')
-      .select(
-        'id, vehicle_id, document_type, reference_number, issue_date, expiry_date, file_path, created_at',
-      )
-      .neq('document_type', 'Vehicle Photo')
-      .order('created_at', { ascending: false });
-    setRows((data ?? []) as RecordRow[]);
-  };
-  useEffect(() => {
-    void load();
-  }, []);
-  const upload = async () => {
-    if (!canManage || !path || !vehicleId) return;
-    const filePath = `${vehicleId}/${Date.now()}-${path.split('/').pop() ?? 'document'}`;
-    try {
-      const response = await fetch(path);
-      const blob = await response.blob();
-      const { error: uploadError } = await supabase.storage
-        .from('vehicle-documents')
-        .upload(filePath, blob, { upsert: false });
-      if (uploadError) throw uploadError;
-      const { error } = await supabase.from('vehicle_documents').insert({
-        vehicle_id: vehicleId,
-        document_type: type,
-        file_path: filePath,
-        uploaded_by: userId,
-      });
-      if (error) throw error;
-      setPath('');
-      await load();
-    } catch (e) {
-      Alert.alert('Unable to upload', e instanceof Error ? e.message : 'Use a local file URI.');
-    }
-  };
-  const remove = async (r: RecordRow) => {
-    if (!canManage) return;
-    if (r.file_path) await supabase.storage.from('vehicle-documents').remove([String(r.file_path)]);
-    const { error } = await supabase.from('vehicle_documents').delete().eq('id', r.id);
-    if (error) Alert.alert('Unable to remove', error.message);
-    else await load();
-  };
-  const replace = async (r: RecordRow) => {
-    if (!canManage || !path || !r.file_path) return;
-    try {
-      const response = await fetch(path);
-      const blob = await response.blob();
-      const nextPath = `${String(r.vehicle_id)}/${Date.now()}-${path.split('/').pop() ?? 'document'}`;
-      const { error: uploadError } = await supabase.storage
-        .from('vehicle-documents')
-        .upload(nextPath, blob, { upsert: false });
-      if (uploadError) throw uploadError;
-      const { error: updateError } = await supabase
-        .from('vehicle_documents')
-        .update({ file_path: nextPath, uploaded_by: userId })
-        .eq('id', r.id);
-      if (updateError) throw updateError;
-      await supabase.storage.from('vehicle-documents').remove([String(r.file_path)]);
-      setPath('');
-      await load();
-    } catch (e) {
-      Alert.alert('Unable to replace', e instanceof Error ? e.message : 'Use a local file URI.');
-    }
-  };
-  return (
-    <Panel>
-      <Heading palette={palette}>Documents</Heading>
-      <Text style={{ color: palette.muted }}>
-        Vehicle Photo is intentionally excluded from this document list.
-      </Text>
-      {!canManage && <Text style={{ color: palette.muted }}>Management access is read-only.</Text>}
-      <VehiclePicker
-        vehicles={vehicles}
-        value={vehicleId}
-        onChange={setVehicleId}
-        palette={palette}
-      />
-      {canManage && (
-        <>
-          <View style={styles.pickerWrap}>
-            {['Revenue Licence', 'Emission Test', 'Insurance', 'Other'].map((v) => (
-              <Pressable
-                key={v}
-                onPress={() => setType(v)}
-                style={[styles.picker, { backgroundColor: type === v ? colors.red : palette.card }]}
-              >
-                <Text style={{ color: type === v ? '#fff' : palette.text }}>{v}</Text>
-              </Pressable>
-            ))}
-          </View>
-          <Field
-            label="Local file URI (for upload)"
-            value={path}
-            onChange={setPath}
-            palette={palette}
-          />
-          <Button title="Upload document" onPress={() => void upload()} />
-        </>
-      )}
-      {rows.map((r) => (
-        <View key={r.id} style={[styles.card, { backgroundColor: palette.card }]}>
-          <Text style={{ color: palette.text }}>{String(r.document_type)}</Text>
-          <View style={styles.row}>
-            <Button title="View" onPress={() => setView(r)} />
-            {canManage && (
-              <Button title="Replace" onPress={() => void replace(r)} disabled={!path} />
-            )}
-            {canManage && <Button title="Remove" onPress={() => void remove(r)} />}
-          </View>
+          {r.document_path ? (
+            <Button title="View receipt" onPress={() => setView(String(r.document_path))} />
+          ) : (
+            <Text style={{ color: palette.muted }}>No receipt uploaded.</Text>
+          )}
         </View>
       ))}
       <Modal visible={!!view} transparent animationType="fade" onRequestClose={() => setView(null)}>
         <View style={styles.overlay}>
           <View style={[styles.viewer, { backgroundColor: palette.card }]}>
-            <Text style={[styles.heading, { color: palette.text }]}>
-              {String(view?.document_type ?? '')}
-            </Text>
-            <Text style={{ color: palette.muted }}>
-              Document content is only loaded after View.
-            </Text>
-            {view?.file_path ? (
-              <SignedContent path={String(view.file_path)} />
-            ) : (
-              <Text style={{ color: palette.muted }}>No file attached.</Text>
-            )}
+            <Heading palette={palette}>Maintenance receipt</Heading>
+            {view ? <SignedContent path={view} /> : null}
             <Button title="Close" onPress={() => setView(null)} />
           </View>
         </View>
@@ -1221,6 +1199,7 @@ function Documents({
     </Panel>
   );
 }
+
 function SignedContent({ path, gallery = false }: { path: string; gallery?: boolean }) {
   const [url, setUrl] = useState('');
   useEffect(() => {
@@ -1261,6 +1240,7 @@ function VehicleProfile({
   const [compliance, setCompliance] = useState<RecordRow[]>([]);
   const [photos, setPhotos] = useState<RecordRow[]>([]);
   const [photoUri, setPhotoUri] = useState('');
+  const [viewFile, setViewFile] = useState<string | null>(null);
   const [tab, setTab] = useState('overview');
   useEffect(() => {
     if (!vehicle || !visible) return;
@@ -1417,9 +1397,32 @@ function VehicleProfile({
           {tab === 'photos' && <Text style={{ color: palette.muted }}>Photos are shown above.</Text>}
           {tab === 'mileage' && <Rows rows={mileage} palette={palette} />}
           {tab === 'inspections' && <Rows rows={inspections} palette={palette} />}
-          {tab === 'maintenance' && <Rows rows={maintenance} palette={palette} />}
-          {tab === 'compliance' && <Rows rows={compliance} palette={palette} />}
+          {tab === 'maintenance' && (
+            <Rows
+              rows={maintenance}
+              palette={palette}
+              fileKey="document_path"
+              onViewFile={setViewFile}
+            />
+          )}
+          {tab === 'compliance' && (
+            <Rows rows={compliance} palette={palette} fileKey="file_path" onViewFile={setViewFile} />
+          )}
         </ScrollView>
+        <Modal
+          visible={!!viewFile}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setViewFile(null)}
+        >
+          <View style={styles.overlay}>
+            <View style={[styles.viewer, { backgroundColor: palette.card }]}>
+              <Heading palette={palette}>Vehicle record attachment</Heading>
+              {viewFile ? <SignedContent path={viewFile} /> : null}
+              <Button title="Close" onPress={() => setViewFile(null)} />
+            </View>
+          </View>
+        </Modal>
       </View>
     </Modal>
   );
@@ -1427,9 +1430,13 @@ function VehicleProfile({
 function Rows({
   rows,
   palette,
+  fileKey,
+  onViewFile,
 }: {
   rows: RecordRow[];
   palette: { card: string; text: string; muted: string };
+  fileKey?: string;
+  onViewFile?: (path: string) => void;
 }) {
   return rows.length ? (
     <>
@@ -1437,12 +1444,16 @@ function Rows({
         <View key={r.id} style={[styles.card, { backgroundColor: palette.card }]}>
           {Object.entries(r)
             .filter(([k]) => !['id', 'vehicle_id'].includes(k))
+            .filter(([k]) => k !== fileKey)
             .slice(0, 6)
             .map(([k, v]) => (
               <Text key={k} style={{ color: palette.muted }}>
                 {k.replaceAll('_', ' ')}: {String(v ?? '—')}
               </Text>
             ))}
+          {fileKey && r[fileKey] && onViewFile ? (
+            <Button title="View attachment" onPress={() => onViewFile(String(r[fileKey]))} />
+          ) : null}
         </View>
       ))}
     </>
