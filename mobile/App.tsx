@@ -931,7 +931,7 @@ function VehicleForm({
   return (
     <View style={[styles.form, { backgroundColor: palette.card }]}>
       <Field
-        label="Registration Form"
+        label="Registration Number"
         value={form.registration_number}
         onChange={set('registration_number')}
         palette={palette}
