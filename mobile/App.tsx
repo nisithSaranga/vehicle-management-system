@@ -290,7 +290,7 @@ function StatCard({
   value: number;
   icon: string;
   tone: 'blue' | 'green' | 'orange';
-  palette: { card: string; text: string; muted: string };
+  palette: { bg: string; card: string; text: string; muted: string };
 }) {
   return (
     <View style={[styles.statCard, { backgroundColor: palette.card }]}>
@@ -921,7 +921,7 @@ function Compliance({
 }: {
   vehicles: VehicleRecord[];
   canManage: boolean;
-  palette: { card: string; text: string; muted: string };
+  palette: { bg: string; card: string; text: string; muted: string };
 }) {
   const [vehicleId, setVehicleId] = useState('');
   const [type, setType] = useState('Revenue Licence');
@@ -931,6 +931,8 @@ function Compliance({
   const [fileUri, setFileUri] = useState('');
   const [rows, setRows] = useState<RecordRow[]>([]);
   const [view, setView] = useState<string | null>(null);
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const selectedVehicle = vehicles.find((vehicle) => vehicle.id === vehicleId);
   const load = async () => {
     const { data } = await supabase
       .from('compliance_records')
@@ -952,6 +954,7 @@ function Compliance({
     setReference(String(existing?.reference_number ?? ''));
     setFileUri('');
   }, [vehicleId, type, rows]);
+  const visibleRows = rows.filter((row) => row.vehicle_id === vehicleId);
   const save = async () => {
     if (!canManage || !vehicleId) {
       Alert.alert('Required', 'Select a vehicle before saving compliance.');
@@ -1006,37 +1009,93 @@ function Compliance({
         place.
       </Text>
       {!canManage && <Text style={{ color: palette.muted }}>Management access is read-only.</Text>}
-      <VehiclePicker
-        vehicles={vehicles}
-        value={vehicleId}
-        onChange={setVehicleId}
-        palette={palette}
-      />
-      <View style={styles.pickerWrap}>
-        {['Revenue Licence', 'Emission Test', 'Insurance'].map((v) => (
-          <Pressable
-            key={v}
-            onPress={() => setType(v)}
-            style={[styles.picker, { backgroundColor: type === v ? colors.red : palette.card }]}
-          >
-            <Text style={{ color: type === v ? '#fff' : palette.text }}>{v}</Text>
-          </Pressable>
-        ))}
+      <View style={styles.dropdownWrap}>
+        <Text style={[styles.fieldLabel, { color: palette.muted }]}>Vehicle</Text>
+        <Pressable
+          style={[styles.dropdownButton, { backgroundColor: palette.card }]}
+          onPress={() => setDropdownOpen(!dropdownOpen)}
+        >
+          <Text style={{ color: selectedVehicle ? palette.text : palette.muted }}>
+            {selectedVehicle
+              ? `${vehicleIcon(selectedVehicle.vehicle_type)}  ${selectedVehicle.make} ${selectedVehicle.model} · ${selectedVehicle.registration_number}`
+              : 'Select a registered vehicle'}
+          </Text>
+          <Text style={{ color: palette.muted }}>{dropdownOpen ? '⌃' : '⌄'}</Text>
+        </Pressable>
+        {dropdownOpen && (
+          <View style={[styles.dropdownList, { backgroundColor: palette.card }]}>
+            {vehicles.map((vehicle) => (
+              <Pressable
+                key={vehicle.id}
+                style={styles.dropdownOption}
+                onPress={() => {
+                  setVehicleId(vehicle.id);
+                  setDropdownOpen(false);
+                }}
+              >
+                <Text style={styles.vehicleTypeIcon}>{vehicleIcon(vehicle.vehicle_type)}</Text>
+                <View style={styles.vehicleListCopy}>
+                  <Text style={{ color: palette.text, fontWeight: '800' }}>
+                    {vehicle.make} {vehicle.model}
+                  </Text>
+                  <Text style={{ color: palette.muted }}>{vehicle.registration_number}</Text>
+                </View>
+              </Pressable>
+            ))}
+          </View>
+        )}
       </View>
-      <Field label="Issue date" value={issue} onChange={setIssue} palette={palette} />
-      <Field label="Expiry date" value={expiry} onChange={setExpiry} palette={palette} />
-      <Field label="Reference number" value={reference} onChange={setReference} palette={palette} />
-      {canManage && (
+      {!selectedVehicle ? (
+        <Text style={{ color: palette.muted }}>
+          Choose a vehicle to add or view its compliance certificates.
+        </Text>
+      ) : (
         <>
-          <Button
-            title={fileUri ? 'Replace certificate photo' : 'Choose certificate photo'}
-            onPress={() => void choosePhoto().then((uri) => uri && setFileUri(uri))}
-          />
-          {fileUri ? <Text style={{ color: palette.muted }}>Certificate photo selected.</Text> : null}
-          <Button title="Save compliance certificate" onPress={() => void save()} />
+          <View style={[styles.updateForm, { backgroundColor: palette.card }]}>
+            <Text style={[styles.detailSectionTitle, { color: palette.text }]}>
+              1. Choose certificate type
+            </Text>
+            <View style={styles.pickerWrap}>
+              {['Revenue Licence', 'Emission Test', 'Insurance'].map((v) => (
+                <Pressable
+                  key={v}
+                  onPress={() => setType(v)}
+                  style={[
+                    styles.picker,
+                    { backgroundColor: type === v ? colors.red : palette.bg },
+                  ]}
+                >
+                  <Text style={{ color: type === v ? '#fff' : palette.text }}>{v}</Text>
+                </Pressable>
+              ))}
+            </View>
+            <Text style={[styles.detailSectionTitle, { color: palette.text }]}>
+              2. Enter certificate details
+            </Text>
+            <Field label="Issue date" value={issue} onChange={setIssue} palette={palette} />
+            <Field label="Expiry date" value={expiry} onChange={setExpiry} palette={palette} />
+            <Field
+              label="Reference number"
+              value={reference}
+              onChange={setReference}
+              palette={palette}
+            />
+            {canManage && (
+              <>
+                <Button
+                  title={fileUri ? 'Replace certificate photo' : 'Choose certificate photo'}
+                  onPress={() => void choosePhoto().then((uri) => uri && setFileUri(uri))}
+                />
+                {fileUri ? (
+                  <Text style={{ color: palette.muted }}>Certificate photo selected.</Text>
+                ) : null}
+                <Button title="Save compliance certificate" onPress={() => void save()} />
+              </>
+            )}
+          </View>
         </>
       )}
-      {rows.map((r) => (
+      {selectedVehicle && visibleRows.map((r) => (
         <View key={r.id} style={[styles.card, { backgroundColor: palette.card }]}>
           <Text style={{ color: palette.text }}>
             {String(r.compliance_type)} · {String(r.expiry_date ?? 'No expiry')} ·{' '}
