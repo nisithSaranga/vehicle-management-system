@@ -1,10 +1,17 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import * as ImagePicker from 'expo-image-picker';
+import * as ImageManipulator from 'expo-image-manipulator';
+import * as FileSystem from 'expo-file-system';
+import * as LegacyFileSystem from 'expo-file-system/legacy';
+import * as Print from 'expo-print';
+import * as Sharing from 'expo-sharing';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import {
   Alert,
   Image,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -19,9 +26,30 @@ import { supabase, type Profile } from './src/lib/supabase';
 
 const config: AppConfig = { appName: 'Riyon International Pvt Ltd', version: '0.1.0' };
 const logo = require('./assets/riyon-logo.png');
-type Section = 'fleet' | 'operations' | 'compliance' | 'maintenance' | 'reports';
+type Section = 'fleet' | 'operations' | 'compliance' | 'maintenance' | 'fuel' | 'reports';
 type RecordRow = Record<string, unknown> & { id: string; vehicle_id: string };
 const colors = { red: '#b42318', navy: '#102a43', muted: '#52606d', border: '#d9e2ec' };
+const VEHICLE_TYPES = [
+  'Double Cab',
+  'Electric Car',
+  'Excavator',
+  'Forklift',
+  'Light Truck',
+  'Lorry',
+  'Motor Bike',
+  'Single Cab',
+];
+const DEPARTMENTS = ['Administration', 'Finance', 'Logistics', 'Maintenance', 'Operations', 'Production'];
+const VEHICLE_MAKES = ['Bajaj', 'Baw', 'BYD', 'Honda', 'Komatsu', 'Mitsubishi', 'Tata', 'Yamaha'];
+const USUAL_USERS = ['Asfer', 'Gunathunga', 'Mahinda', 'Ms. Fiona', 'Nisith', 'Ramesh', 'W.U. Kumara'];
+async function normalizeImage(uri: string) {
+  const result = await ImageManipulator.manipulateAsync(
+    uri,
+    [{ resize: { width: 1600 } }],
+    { compress: 0.82, format: ImageManipulator.SaveFormat.JPEG },
+  );
+  return result.uri;
+}
 
 async function choosePhoto(): Promise<string | null> {
   const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -35,6 +63,23 @@ async function choosePhoto(): Promise<string | null> {
     quality: 0.9,
   });
   return result.canceled ? null : result.assets[0]?.uri ?? null;
+}
+async function choosePhotos(): Promise<string[]> {
+  const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+  if (!permission.granted) {
+    Alert.alert('Permission required', 'Allow photo access to attach vehicle photos.');
+    return [];
+  }
+  const result = await ImagePicker.launchImageLibraryAsync({
+    mediaTypes: ['images'],
+    allowsMultipleSelection: true,
+    allowsEditing: false,
+    quality: 0.9,
+  });
+  return result.canceled ? [] : result.assets.map((asset) => asset.uri);
+}
+function isMissingSchemaField(message: string) {
+  return /does not exist|could not find|schema cache|column .* missing/i.test(message);
 }
 
 export default function App() {
@@ -63,7 +108,7 @@ export default function App() {
     const { data, error: queryError } = await supabase
       .from('vehicles')
       .select(
-        'id, registration_number, make, model, vehicle_type, manufacturing_year, department, assigned_driver, fuel_type, status',
+        'id, registration_number, make, model, vehicle_type, manufacturing_year, department, assigned_driver, energy_type, fuel_type, status',
       )
       .order('registration_number');
     if (queryError) setError(queryError.message);
@@ -135,8 +180,8 @@ export default function App() {
         />
         <View style={styles.welcomeBlock}>
           <Text style={[styles.welcomeTitle, { color: palette.text }]}>
-            Welcome, {profile.full_name.split(' ')[0]}!
-          </Text>
+             Welcome, {profile.email?.split('@')[0]}!
+          </Text> 
           <Text style={[styles.subtitle, { color: palette.muted }]}>
             Here&apos;s your fleet overview for today.
           </Text>
@@ -195,6 +240,7 @@ export default function App() {
               ['operations', 'Inspections', 'Mileage and weekly checks', '✓'],
               ['compliance', 'Compliance', 'Licences, tests, insurance', '▣'],
               ['maintenance', 'Maintenance', 'Service and repair history', '⚒'],
+              ['fuel', 'Fuel & Refuelling', 'Track fuel usage and costs', '⛽'],
               ['reports', 'Reports', 'Structured vehicle report', '▥'],
             ] as Array<[Section, string, string, string]>
           )
@@ -228,18 +274,11 @@ export default function App() {
         onRequestClose={() => setSection(null)}
       >
         <View style={[styles.modalPage, { backgroundColor: palette.bg }]}>
-          <View style={styles.modalHeader}>
-            <Text style={[styles.modalTitle, { color: palette.text }]}>
-              {sectionTitle(section)}
-            </Text>
-            <Pressable onPress={() => setSection(null)}>
-              <Text style={styles.close}>Close</Text>
-            </Pressable>
-          </View>
           {section === 'fleet' && (
             <Fleet
               vehicles={vehicles}
               canManage={!!canManage}
+              userId={session.user.id}
               onRefresh={refresh}
               onSelect={setSelected}
               palette={palette}
@@ -261,7 +300,20 @@ export default function App() {
             />
           )}
           {section === 'maintenance' && (
-            <Maintenance vehicles={vehicles} canManage={!!canManage} palette={palette} />
+            <Maintenance
+              vehicles={vehicles}
+              canManage={!!canManage}
+              userId={session.user.id}
+              palette={palette}
+            />
+          )}
+          {section === 'fuel' && (
+            <Fuel
+              vehicles={vehicles}
+              canManage={!!canManage}
+              userId={session.user.id}
+              palette={palette}
+            />
           )}
           {section === 'reports' && <Reports vehicles={vehicles} palette={palette} />}
         </View>
@@ -270,6 +322,19 @@ export default function App() {
         vehicle={selected}
         visible={!!selected}
         onClose={() => setSelected(null)}
+        onToggleArchive={async () => {
+          if (!selected) return;
+          const { error: archiveError } = await supabase
+            .from('vehicles')
+            .update({ status: selected.status === 'active' ? 'archived' : 'active' })
+            .eq('id', selected.id);
+          if (archiveError) {
+            Alert.alert('Unable to update vehicle status', archiveError.message);
+            return;
+          }
+          await refresh();
+          setSelected(null);
+        }}
         canManage={!!canManage}
         userId={session.user.id}
         palette={palette}
@@ -316,6 +381,7 @@ function sectionTitle(section: Section | null) {
     operations: 'Weekly records',
     compliance: 'Compliance',
     maintenance: 'Maintenance',
+    fuel: 'Fuel & Refuelling',
     reports: 'Reports',
   }[section ?? 'fleet'];
 }
@@ -323,6 +389,7 @@ function vehicleIcon(type: string) {
   const normalized = type.toLowerCase();
   if (normalized.includes('bike') || normalized.includes('scooty')) return '🏍';
   if (normalized.includes('forklift')) return '🏗';
+  if (normalized.includes('light truck')) return '🛻';
   if (normalized.includes('lorry') || normalized.includes('cab')) return '🚚';
   return '🚘';
 }
@@ -392,19 +459,80 @@ function Field({
     />
   );
 }
+function DatePickerField({
+  label,
+  value,
+  onChange,
+  palette,
+  allowFuture = false,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  palette: { card: string; text: string; muted: string };
+  allowFuture?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <View>
+      <Text style={[styles.fieldLabel, { color: palette.muted }]}>{label}</Text>
+      <Pressable
+        style={[styles.dateButton, { backgroundColor: palette.card, borderColor: colors.border }]}
+        onPress={() => setOpen(true)}
+      >
+        <Text style={{ color: value ? palette.text : palette.muted }}>
+          {value || 'Select date'}
+        </Text>
+        <Text style={{ color: palette.muted }}>▣</Text>
+      </Pressable>
+      {open && (
+        <DateTimePicker
+          value={parseDate(value)}
+          mode="date"
+          display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+          maximumDate={allowFuture ? undefined : new Date()}
+          onChange={(_event, selectedDate) => {
+            setOpen(false);
+            if (selectedDate) onChange(formatDate(selectedDate));
+          }}
+        />
+      )}
+    </View>
+  );
+}
+function parseDate(value: string) {
+  if (!value) return new Date();
+  const [year, month, day] = value.split('-').map(Number);
+  const parsed = new Date(year, (month || 1) - 1, day || 1);
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+function formatDate(value: Date) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
 function Button({
   title,
   onPress,
   disabled = false,
+  variant = 'primary',
 }: {
   title: string;
   onPress: () => void;
   disabled?: boolean;
+  variant?: 'primary' | 'secondary' | 'success' | 'archive';
 }) {
   return (
     <Pressable
       disabled={disabled}
-      style={[styles.button, disabled && { opacity: 0.6 }]}
+      style={[
+        styles.button,
+        variant === 'secondary' && styles.buttonSecondary,
+        variant === 'success' && styles.buttonSuccess,
+        variant === 'archive' && styles.buttonArchive,
+        disabled && { opacity: 0.6 },
+      ]}
       onPress={onPress}
     >
       <Text style={styles.buttonText}>{title}</Text>
@@ -448,173 +576,290 @@ function VehiclePicker({
 function Fleet({
   vehicles,
   canManage,
+  userId,
   onRefresh,
   onSelect,
   palette,
 }: {
   vehicles: VehicleRecord[];
   canManage: boolean;
+  userId: string;
   onRefresh: () => Promise<void>;
   onSelect: (v: VehicleRecord) => void;
-  palette: { card: string; text: string; muted: string };
+  palette: { bg: string; card: string; text: string; muted: string };
 }) {
   const [showForm, setShowForm] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const changeStatus = async (v: VehicleRecord) => {
-    setBusy(true);
-    const { error } = await supabase
-      .from('vehicles')
-      .update({ status: v.status === 'active' ? 'archived' : 'active' })
-      .eq('id', v.id);
-    if (error) Alert.alert('Unable to update vehicle', error.message);
-    else await onRefresh();
-    setBusy(false);
-  };
-  const deleteVehicle = async (v: VehicleRecord) => {
-    if (!canManage) return;
-    Alert.alert(
-      'Delete vehicle permanently?',
-      `${v.make} ${v.model} (${v.registration_number}) and all related records will be removed.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            setBusy(true);
-            const [{ data: documents }, { data: compliance }, { data: maintenance }] =
-              await Promise.all([
-                supabase
-                  .from('vehicle_documents')
-                  .select('file_path')
-                  .eq('vehicle_id', v.id),
-                supabase
-                  .from('compliance_records')
-                  .select('file_path')
-                  .eq('vehicle_id', v.id),
-                supabase
-                  .from('maintenance_records')
-                  .select('document_path')
-                  .eq('vehicle_id', v.id),
-              ]);
-            const paths = [
-              ...(documents ?? []).map((document) => document.file_path),
-              ...(compliance ?? []).map((record) => record.file_path),
-              ...(maintenance ?? []).map((record) => record.document_path),
-            ].filter((path): path is string => !!path);
-            if (paths.length) await supabase.storage.from('vehicle-documents').remove(paths);
-            const dependentTables = [
-              'reminder_logs',
-              'notifications',
-              'vehicle_documents',
-              'mileage_records',
-              'maintenance_records',
-              'compliance_records',
-              'inspections',
-            ] as const;
-            for (const table of dependentTables) {
-              const { error } = await supabase.from(table).delete().eq('vehicle_id', v.id);
-              if (error) {
-                Alert.alert('Unable to delete vehicle', error.message);
-                setBusy(false);
-                return;
-              }
-            }
-            const { error } = await supabase.from('vehicles').delete().eq('id', v.id);
-            if (error) Alert.alert('Unable to delete vehicle', error.message);
-            else await onRefresh();
-            setBusy(false);
-          },
-        },
-      ],
-    );
-  };
-  const visibleVehicles = vehicles.filter((v) =>
-    showArchived ? v.status !== 'active' : v.status === 'active',
-  );
+  const [searchText, setSearchText] = useState('');
+  const [typeFilter, setTypeFilter] = useState('All types');
+  const [departmentFilter, setDepartmentFilter] = useState('All departments');
+  const [attention, setAttention] = useState<Record<string, { message: string; tone: 'attention' | 'due' | 'active' }>>({});
+  useEffect(() => {
+    const loadAttention = async () => {
+      const [{ data: compliance, error: complianceError }, { data: maintenance, error: maintenanceError }] =
+        await Promise.all([
+          supabase
+            .from('compliance_records')
+            .select('vehicle_id, compliance_type, expiry_date, updated_at, created_at'),
+          supabase.from('maintenance_records').select('vehicle_id, next_service_date'),
+        ]);
+      if (complianceError || maintenanceError) {
+        Alert.alert(
+          'Unable to load vehicle due dates',
+          complianceError?.message ?? maintenanceError?.message ?? 'Please try again.',
+        );
+        return;
+      }
+      const today = new Date();
+      const todayText = formatDate(today);
+      const nextState: Record<string, { message: string; tone: 'attention' | 'due' | 'active' }> = {};
+      for (const vehicle of vehicles) {
+        const vehicleMaintenance = (maintenance ?? [])
+          .filter((record) => record.vehicle_id === vehicle.id && record.next_service_date)
+          .sort((a, b) => String(a.next_service_date).localeCompare(String(b.next_service_date)));
+        const nextService = vehicleMaintenance[0]?.next_service_date as string | undefined;
+        const latestComplianceByType = new Map<string, { expiry_date: string }>();
+        for (const record of (compliance ?? [])
+          .filter((item) => item.vehicle_id === vehicle.id && item.expiry_date)
+          .sort((a, b) =>
+            String(b.updated_at ?? b.created_at ?? '').localeCompare(
+              String(a.updated_at ?? a.created_at ?? ''),
+            ),
+          )) {
+          if (!latestComplianceByType.has(String(record.compliance_type))) {
+            latestComplianceByType.set(String(record.compliance_type), {
+              expiry_date: String(record.expiry_date),
+            });
+          }
+        }
+        const complianceDueCandidates = Array.from(latestComplianceByType.entries()).map(
+          ([complianceType, record]) => ({
+            date: record.expiry_date,
+            label:
+              complianceType === 'Revenue Licence'
+                ? 'Revenue licence expires'
+                : complianceType === 'Emission Test'
+                  ? 'Emission test expires'
+                  : 'Insurance expires',
+          }),
+        );
+        const dueCandidates = [
+          nextService ? { date: nextService, label: 'Next service' } : null,
+          ...complianceDueCandidates,
+        ]
+          .filter((candidate): candidate is { date: string; label: string } => candidate !== null)
+          .sort((a, b) => a.date.localeCompare(b.date));
+        const nextDue = dueCandidates[0];
+        if (!nextDue) {
+          nextState[vehicle.id] = { message: 'No upcoming due date', tone: 'active' };
+          continue;
+        }
+        const dueDate = nextDue.date;
+        const days = Math.ceil(
+          (new Date(`${dueDate}T00:00:00`).getTime() - new Date(`${todayText}T00:00:00`).getTime()) /
+            86400000,
+        );
+        const label = nextDue.label;
+        nextState[vehicle.id] =
+          days < 0
+            ? { message: `${label} overdue by ${Math.abs(days)} days`, tone: 'attention' }
+            : days <= 30
+              ? { message: `${label} in ${days} days`, tone: 'due' }
+              : { message: `${label} ${dueDate}`, tone: 'active' };
+      }
+      setAttention(nextState);
+    };
+    if (vehicles.length) void loadAttention();
+  }, [vehicles]);
+  const visibleVehicles = vehicles
+    .filter((v) => (showArchived ? v.status !== 'active' : v.status === 'active'))
+    .filter((v) => `${v.make} ${v.model} ${v.registration_number}`.toLowerCase().includes(searchText.toLowerCase()))
+    .filter((v) => typeFilter === 'All types' || v.vehicle_type === typeFilter)
+    .filter((v) => departmentFilter === 'All departments' || v.department === departmentFilter);
+  const vehicleTypes = ['All types', ...VEHICLE_TYPES];
+  const departments = ['All departments', ...DEPARTMENTS];
+  const needsAction = vehicles.filter((v) => attention[v.id]?.tone !== 'active').length;
   return (
     <Panel>
-      <View style={styles.row}>
-        <Heading palette={palette}>Fleet vehicles</Heading>
+      <View style={styles.fleetHeader}>
+        <View>
+          <Heading palette={palette}>Vehicles</Heading>
+          <Text style={{ color: palette.muted }}>
+            {vehicles.length} vehicles · {needsAction} need action
+          </Text>
+        </View>
         {canManage && (
           <Button
-            title={showForm ? 'Close' : 'Add vehicle'}
+            title="+ Add vehicle"
+            variant="secondary"
             onPress={() => setShowForm(!showForm)}
           />
         )}
       </View>
-      <View style={styles.listToggle}>
-        <Pressable
-          style={[styles.listToggleButton, !showArchived && styles.listToggleActive]}
-          onPress={() => setShowArchived(false)}
-        >
-          <Text style={{ color: !showArchived ? '#fff' : palette.muted }}>Active vehicles</Text>
-        </Pressable>
-        <Pressable
-          style={[styles.listToggleButton, showArchived && styles.listToggleActive]}
-          onPress={() => setShowArchived(true)}
-        >
-          <Text style={{ color: showArchived ? '#fff' : palette.muted }}>Archive list</Text>
-        </Pressable>
-      </View>
+      {!showForm && (
+        <>
+          <View style={styles.listToggle}>
+            <Pressable
+              style={[styles.listToggleButton, !showArchived && styles.listToggleActive]}
+              onPress={() => setShowArchived(false)}
+            >
+              <Text style={{ color: !showArchived ? '#fff' : palette.muted }}>
+                Active · {vehicles.filter((v) => v.status === 'active').length}
+              </Text>
+            </Pressable>
+            <Pressable
+              style={[styles.listToggleButton, showArchived && styles.listToggleActive]}
+              onPress={() => setShowArchived(true)}
+            >
+              <Text style={{ color: showArchived ? '#fff' : palette.muted }}>Archived</Text>
+            </Pressable>
+          </View>
+          <Field
+            label="Search name or plate"
+            value={searchText}
+            onChange={setSearchText}
+            palette={palette}
+          />
+          <View style={styles.filterRow}>
+            <View style={styles.filterField}>
+              <ChoiceField
+                label="Type"
+                value={typeFilter}
+                options={vehicleTypes}
+                onChange={setTypeFilter}
+                palette={palette}
+              />
+            </View>
+            <View style={styles.filterField}>
+              <ChoiceField
+                label="Department"
+                value={departmentFilter}
+                options={departments}
+                onChange={setDepartmentFilter}
+                palette={palette}
+              />
+            </View>
+          </View>
+        </>
+      )}
       {showForm && (
         <VehicleForm
           onSaved={() => {
             setShowForm(false);
             void onRefresh();
           }}
+          userId={userId}
           palette={palette}
         />
       )}
-      {visibleVehicles.length === 0 ? (
+      {!showForm && (visibleVehicles.length === 0 ? (
         <Text style={{ color: palette.muted }}>
           {showArchived ? 'No archived vehicles.' : 'No active vehicles have been registered yet.'}
         </Text>
       ) : (
         visibleVehicles.map((v) => (
-          <View key={v.id} style={[styles.card, { backgroundColor: palette.card }]}>
+          <Pressable
+            key={v.id}
+            style={[styles.card, { backgroundColor: palette.card }]}
+            onPress={() => onSelect(v)}
+          >
             <View style={styles.vehicleListHeader}>
               <Text style={styles.vehicleTypeIcon}>{vehicleIcon(v.vehicle_type)}</Text>
               <View style={styles.vehicleListCopy}>
-                <Text style={[styles.cardTitle, { color: palette.text }]}>
-                  {v.make} {v.model}
-                </Text>
+                <View style={styles.vehicleCardTitleRow}>
+                  <Text style={[styles.cardTitle, { color: palette.text }]}>{v.make} {v.model}</Text>
+                  <Text
+                    style={[
+                      styles.vehicleStatus,
+                      attention[v.id]?.tone === 'attention'
+                        ? styles.vehicleStatusAttention
+                        : attention[v.id]?.tone === 'due'
+                          ? styles.vehicleStatusDue
+                          : styles.vehicleStatusActive,
+                    ]}
+                  >
+                    {attention[v.id]?.tone === 'attention'
+                      ? 'Needs attention'
+                      : attention[v.id]?.tone === 'due'
+                        ? 'Due soon'
+                        : v.status === 'active'
+                          ? 'Active'
+                          : 'Archived'}
+                  </Text>
+                </View>
                 <Text style={styles.plate}>{v.registration_number}</Text>
                 <Text style={{ color: palette.muted }}>
-                  {v.vehicle_type} · {v.department ?? 'No department'}
+                  {v.vehicle_type} · {v.department ?? 'No department'} ·{' '}
+                  {v.energy_type === 'electric' ? 'Electric' : v.fuel_type ?? 'Fuel'}
                 </Text>
               </View>
             </View>
-            <View style={styles.vehicleActions}>
-              <Button title="View" onPress={() => onSelect(v)} />
-              {canManage && (
-                <Button
-                  title={v.status === 'active' ? 'Archive' : 'Restore'}
-                  disabled={busy}
-                  onPress={() => void changeStatus(v)}
-                />
-              )}
-              {canManage && v.status !== 'active' && (
-                <Button
-                  title="Delete"
-                  disabled={busy}
-                  onPress={() => void deleteVehicle(v)}
-                />
-              )}
+            <View style={styles.vehicleDueRow}>
+              <Text style={{ color: attention[v.id]?.tone === 'attention' ? colors.red : palette.muted }}>
+                {attention[v.id]?.message ?? 'No upcoming due date'}
+              </Text>
             </View>
-          </View>
+          </Pressable>
         ))
-      )}
+      ))}
     </Panel>
   );
 }
+
+function ChoiceField({
+  label,
+  value,
+  options,
+  onChange,
+  palette,
+}: {
+  label: string;
+  value: string;
+  options: string[];
+  onChange: (value: string) => void;
+  palette: { card: string; text: string; muted: string };
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <View style={styles.dropdownWrap}>
+      <Text style={[styles.fieldLabel, { color: palette.muted }]}>{label}</Text>
+      <Pressable
+        style={[styles.dropdownButton, { backgroundColor: palette.card }]}
+        onPress={() => setOpen(!open)}
+      >
+        <Text style={{ color: value ? palette.text : palette.muted }}>
+          {value || `Select ${label.toLowerCase()}`}
+        </Text>
+        <Text style={{ color: palette.muted }}>{open ? '⌃' : '⌄'}</Text>
+      </Pressable>
+      {open && (
+        <View style={[styles.dropdownList, { backgroundColor: palette.card }]}>
+          {options.map((option) => (
+            <Pressable
+              key={option}
+              style={styles.dropdownOption}
+              onPress={() => {
+                onChange(option);
+                setOpen(false);
+              }}
+            >
+              <Text style={{ color: palette.text }}>{option}</Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
+
 function VehicleForm({
   onSaved,
+  userId,
   palette,
 }: {
   onSaved: () => void;
-  palette: { text: string; card: string };
+  userId: string;
+  palette: { text: string; card: string; muted: string };
 }) {
   const [form, setForm] = useState({
     registration_number: '',
@@ -624,44 +869,144 @@ function VehicleForm({
     manufacturing_year: String(new Date().getFullYear()),
     department: '',
     assigned_driver: '',
+    energy_type: 'fuel',
     fuel_type: '',
   });
   const [busy, setBusy] = useState(false);
+  const [photoUris, setPhotoUris] = useState<string[]>([]);
   const set = (key: keyof typeof form) => (value: string) =>
     setForm((f) => ({ ...f, [key]: value }));
   const save = async () => {
-    if (!form.registration_number || !form.make || !form.model || !form.vehicle_type)
-      return Alert.alert('Required', 'Registration, make, model, and vehicle type are required.');
+    if (
+      !form.registration_number ||
+      !form.make ||
+      !form.model ||
+      !form.vehicle_type ||
+      !form.energy_type ||
+      (form.energy_type === 'fuel' && !form.fuel_type)
+    )
+      return Alert.alert(
+        'Required',
+        'Registration, make, model, vehicle type, energy type, and fuel type for fuel vehicles are required.',
+      );
     setBusy(true);
-    const { error } = await supabase
+    const { data: vehicle, error } = await supabase
       .from('vehicles')
-      .insert({ ...form, manufacturing_year: Number(form.manufacturing_year) });
-    if (error) Alert.alert('Unable to add vehicle', error.message);
-    else onSaved();
+      .insert({ ...form, manufacturing_year: Number(form.manufacturing_year) })
+      .select('id')
+      .single();
+    if (error) {
+      Alert.alert('Unable to add vehicle', error.message);
+      setBusy(false);
+      return;
+    }
+    if (photoUris.length && vehicle?.id) {
+      try {
+        for (const [index, uri] of photoUris.entries()) {
+          const filePath = `${vehicle.id}/vehicle-${Date.now()}-${index}-${uri.split('/').pop() ?? 'photo'}`;
+          const normalizedUri = await normalizeImage(uri);
+          const file = await new FileSystem.File(normalizedUri).bytes();
+          const { error: uploadError } = await supabase.storage
+            .from('vehicle-documents')
+            .upload(filePath, file, { upsert: false, contentType: 'image/jpeg' });
+          if (uploadError) throw uploadError;
+          const { error: documentError } = await supabase.from('vehicle_documents').insert({
+            vehicle_id: vehicle.id,
+            document_type: 'Vehicle Photo',
+            file_path: filePath,
+            uploaded_by: userId,
+          });
+          if (documentError) throw documentError;
+        }
+      } catch (photoError) {
+        Alert.alert(
+          'Vehicle saved, but photos could not be uploaded',
+          photoError instanceof Error ? photoError.message : 'Please add photos from the vehicle profile.',
+        );
+      }
+    }
+    onSaved();
     setBusy(false);
   };
   return (
     <View style={[styles.form, { backgroundColor: palette.card }]}>
-      {(
-        [
-          'registration_number',
-          'make',
-          'model',
-          'vehicle_type',
-          'manufacturing_year',
-          'department',
-          'assigned_driver',
-          'fuel_type',
-        ] as Array<keyof typeof form>
-      ).map((key) => (
-        <Field
-          key={key}
-          label={key.replaceAll('_', ' ')}
-          value={form[key]}
-          onChange={set(key)}
+      <Field
+        label="Registration Form"
+        value={form.registration_number}
+        onChange={set('registration_number')}
+        palette={palette}
+      />
+      <ChoiceField
+        label="Make"
+        value={form.make}
+        options={VEHICLE_MAKES}
+        onChange={set('make')}
+        palette={palette}
+      />
+      <Field label="Model" value={form.model} onChange={set('model')} palette={palette} />
+      <Field
+        label="Manufacturing year"
+        value={form.manufacturing_year}
+        onChange={set('manufacturing_year')}
+        palette={palette}
+      />
+      <ChoiceField
+        label="Vehicle type"
+        value={form.vehicle_type}
+        options={VEHICLE_TYPES}
+        onChange={set('vehicle_type')}
+        palette={palette}
+      />
+      <ChoiceField
+        label="Department"
+        value={form.department}
+        options={DEPARTMENTS}
+        onChange={set('department')}
+        palette={palette}
+      />
+      <ChoiceField
+        label="Usual company user"
+        value={form.assigned_driver}
+        options={USUAL_USERS}
+        onChange={set('assigned_driver')}
+        palette={palette}
+      />
+      <ChoiceField
+        label="Energy type"
+        value={form.energy_type === 'fuel' ? 'Fuel' : 'Electric'}
+        options={['Fuel', 'Electric']}
+        onChange={(option) =>
+          setForm((current) => ({
+            ...current,
+            energy_type: option === 'Fuel' ? 'fuel' : 'electric',
+            fuel_type: option === 'Fuel' ? current.fuel_type : '',
+          }))
+        }
+        palette={palette}
+      />
+      {form.energy_type === 'fuel' && (
+        <ChoiceField
+          label="Fuel type"
+          value={form.fuel_type}
+          options={['Petrol', 'Diesel']}
+          onChange={set('fuel_type')}
           palette={palette}
         />
-      ))}
+      )}
+      <Pressable
+        style={styles.attachmentBox}
+        onPress={() => void choosePhotos().then(setPhotoUris)}
+      >
+        {photoUris.length ? (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            {photoUris.map((uri) => (
+              <Image key={uri} source={{ uri }} style={styles.attachmentPreview} />
+            ))}
+          </ScrollView>
+        ) : (
+          <Text style={{ color: palette.muted }}>Upload vehicle photos</Text>
+        )}
+      </Pressable>
       <Button
         title={busy ? 'Saving...' : 'Save vehicle'}
         disabled={busy}
@@ -680,17 +1025,20 @@ function Operations({
   vehicles: VehicleRecord[];
   canManage: boolean;
   userId: string;
-  palette: { card: string; text: string; muted: string };
+  palette: { bg: string; card: string; text: string; muted: string };
 }) {
   const [vehicleId, setVehicleId] = useState('');
   const [mode, setMode] = useState<'mileage' | 'inspection' | null>(null);
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [odometer, setOdometer] = useState('');
+  const [inspectionOdometer, setInspectionOdometer] = useState('');
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [condition, setCondition] = useState('Good');
-  const [remarks, setRemarks] = useState('');
+  const [mileageRemarks, setMileageRemarks] = useState('');
+  const [inspectionRemarks, setInspectionRemarks] = useState('');
   const [mileageRows, setMileageRows] = useState<RecordRow[]>([]);
   const [inspectionRows, setInspectionRows] = useState<RecordRow[]>([]);
+  const [historyView, setHistoryView] = useState<'mileage' | 'inspection' | null>(null);
   const selectedVehicle = vehicles.find((vehicle) => vehicle.id === vehicleId);
   const loadHistory = async () => {
     if (!vehicleId) {
@@ -707,7 +1055,7 @@ function Operations({
         .limit(5),
       supabase
         .from('inspections')
-        .select('id, vehicle_id, inspection_date, overall_condition, remarks')
+        .select('id, vehicle_id, inspection_date, odometer_reading, overall_condition, remarks')
         .eq('vehicle_id', vehicleId)
         .order('inspection_date', { ascending: false })
         .limit(5),
@@ -728,8 +1076,22 @@ function Operations({
   const saveMileage = async () => {
     if (!canManage) return;
     const reading = Number.parseFloat(odometer);
-    if (!vehicleId || !date || !Number.isFinite(reading) || reading < 0) {
+    if (!vehicleId || !date || date > formatDate(new Date()) || !Number.isFinite(reading) || reading < 0) {
       Alert.alert('Required', 'Select a vehicle, enter a valid odometer reading, and choose a date.');
+      return;
+    }
+    const { data: existing, error: existingError } = await supabase
+      .from('mileage_records')
+      .select('id')
+      .eq('vehicle_id', vehicleId)
+      .eq('reading_date', date)
+      .limit(1);
+    if (existingError) {
+      Alert.alert('Unable to check mileage records', existingError.message);
+      return;
+    }
+    if (existing?.length) {
+      Alert.alert('Mileage already recorded', 'Only one mileage record can be saved for this vehicle on a day.');
       return;
     }
     const { error } = await supabase.from('mileage_records').insert({
@@ -737,20 +1099,31 @@ function Operations({
       recorded_by: userId,
       odometer_reading: reading,
       reading_date: date,
-      notes: remarks,
+      notes: mileageRemarks,
     });
     if (error) Alert.alert('Unable to save mileage', error.message);
     else {
       setOdometer('');
-      setRemarks('');
+      setMileageRemarks('');
       await loadHistory();
       Alert.alert('Saved', 'Mileage reading added.');
     }
   };
   const saveInspection = async () => {
     if (!canManage) return;
-    if (!vehicleId || !date || !condition) {
-      Alert.alert('Required', 'Select a vehicle, choose a date, and enter the condition.');
+    const reading = Number.parseFloat(inspectionOdometer);
+    if (
+      !vehicleId ||
+      !date ||
+      date > formatDate(new Date()) ||
+      !condition ||
+      !Number.isFinite(reading) ||
+      reading < 0
+    ) {
+      Alert.alert(
+        'Required',
+        'Select a vehicle, choose a date, enter the odometer reading, and enter the condition.',
+      );
       return;
     }
     const { error } = await supabase.from('inspections').insert({
@@ -758,12 +1131,14 @@ function Operations({
       inspector_id: userId,
       inspection_date: date,
       week_start_date: date,
+      odometer_reading: reading,
       overall_condition: condition,
-      remarks,
+      remarks: inspectionRemarks,
     });
     if (error) Alert.alert('Unable to save inspection', error.message);
     else {
-      setRemarks('');
+      setInspectionOdometer('');
+      setInspectionRemarks('');
       await loadHistory();
       Alert.alert('Saved', 'Inspection recorded.');
     }
@@ -849,7 +1224,7 @@ function Operations({
           <Text style={[styles.detailSectionTitle, { color: palette.text }]}>
             {mode === 'mileage' ? 'Mileage details' : 'Inspection details'}
           </Text>
-          <Field label="Date (YYYY-MM-DD)" value={date} onChange={setDate} palette={palette} />
+          <DatePickerField label="Date" value={date} onChange={setDate} palette={palette} />
           {mode === 'mileage' ? (
             <Field
               label="Odometer reading (km)"
@@ -859,9 +1234,28 @@ function Operations({
               keyboardType="decimal-pad"
             />
           ) : (
-            <Field label="Overall condition" value={condition} onChange={setCondition} palette={palette} />
+            <>
+              <Field
+                label="Odometer reading (km)"
+                value={inspectionOdometer}
+                onChange={setInspectionOdometer}
+                palette={palette}
+                keyboardType="decimal-pad"
+              />
+              <Field
+                label="Overall condition"
+                value={condition}
+                onChange={setCondition}
+                palette={palette}
+              />
+            </>
           )}
-          <Field label="Remarks" value={remarks} onChange={setRemarks} palette={palette} />
+          <Field
+            label="Remarks"
+            value={mode === 'mileage' ? mileageRemarks : inspectionRemarks}
+            onChange={mode === 'mileage' ? setMileageRemarks : setInspectionRemarks}
+            palette={palette}
+          />
           {canManage && (
             <Button
               title={mode === 'mileage' ? 'Save mileage' : 'Save inspection'}
@@ -870,46 +1264,468 @@ function Operations({
           )}
         </View>
       )}
-      {selectedVehicle && (
+      {selectedVehicle && mode === 'mileage' && (
         <>
           <View style={styles.historyHeader}>
             <Text style={[styles.detailSectionTitle, { color: palette.text }]}>Recent mileage</Text>
-            <Text style={[styles.sectionHint, { color: palette.muted }]}>Last 5 readings</Text>
+            <Text style={[styles.sectionHint, { color: palette.muted }]}>Latest reading</Text>
           </View>
           {mileageRows.length ? (
-            mileageRows.map((r) => (
-              <View key={r.id} style={[styles.historyCard, { backgroundColor: palette.card }]}>
-                <Text style={[styles.historyValue, { color: palette.text }]}>
-                  {String(r.odometer_reading)} km
-                </Text>
-                <Text style={{ color: palette.muted }}>{String(r.reading_date)}</Text>
-                {r.notes ? <Text style={{ color: palette.muted }}>{String(r.notes)}</Text> : null}
-              </View>
-            ))
+            <View style={[styles.historyCard, { backgroundColor: palette.card }]}>
+              <Text style={[styles.historyValue, { color: palette.text }]}>
+                {String(mileageRows[0].odometer_reading)} km
+              </Text>
+              <Text style={{ color: palette.muted }}>{String(mileageRows[0].reading_date)}</Text>
+              {mileageRows[0].notes ? (
+                <Text style={{ color: palette.muted }}>{String(mileageRows[0].notes)}</Text>
+              ) : null}
+              <Button
+                title="View mileage history"
+                variant="secondary"
+                onPress={() => setHistoryView('mileage')}
+              />
+            </View>
           ) : (
             <Text style={{ color: palette.muted }}>No mileage readings for this vehicle.</Text>
           )}
+        </>
+      )}
+      {selectedVehicle && mode === 'inspection' && (
+        <>
           <View style={styles.historyHeader}>
             <Text style={[styles.detailSectionTitle, { color: palette.text }]}>
               Recent inspections
             </Text>
-            <Text style={[styles.sectionHint, { color: palette.muted }]}>Last 5 inspections</Text>
+            <Text style={[styles.sectionHint, { color: palette.muted }]}>Latest inspection</Text>
           </View>
           {inspectionRows.length ? (
-            inspectionRows.map((r) => (
-              <View key={r.id} style={[styles.historyCard, { backgroundColor: palette.card }]}>
-                <Text style={[styles.historyValue, { color: palette.text }]}>
-                  {String(r.overall_condition)}
-                </Text>
-                <Text style={{ color: palette.muted }}>{String(r.inspection_date)}</Text>
-                {r.remarks ? <Text style={{ color: palette.muted }}>{String(r.remarks)}</Text> : null}
-              </View>
-            ))
+            <View style={[styles.historyCard, { backgroundColor: palette.card }]}>
+              <Text style={[styles.historyValue, { color: palette.text }]}>
+                {String(inspectionRows[0].overall_condition)}
+              </Text>
+              <Text style={{ color: palette.muted }}>{String(inspectionRows[0].inspection_date)}</Text>
+              <Text style={{ color: palette.muted }}>
+                Odometer: {String(inspectionRows[0].odometer_reading)} km
+              </Text>
+              {inspectionRows[0].remarks ? (
+                <Text style={{ color: palette.muted }}>{String(inspectionRows[0].remarks)}</Text>
+              ) : null}
+              <Button
+                title="View inspection history"
+                variant="success"
+                onPress={() => setHistoryView('inspection')}
+              />
+            </View>
           ) : (
             <Text style={{ color: palette.muted }}>No inspections for this vehicle.</Text>
           )}
         </>
       )}
+      <Modal
+        visible={historyView !== null}
+        animationType="slide"
+        onRequestClose={() => setHistoryView(null)}
+      >
+        <View style={[styles.modalPage, { backgroundColor: palette.bg }]}>
+          <View style={styles.modalHeader}>
+            <View>
+              <Text style={[styles.vehicleDetailTitle, { color: palette.text }]}>
+                {historyView === 'mileage' ? 'Mileage history' : 'Inspection history'}
+              </Text>
+              <Text style={{ color: palette.muted }}>
+                {selectedVehicle?.registration_number ?? 'Selected vehicle'}
+              </Text>
+            </View>
+          </View>
+          <ScrollView contentContainerStyle={styles.panel}>
+            <ScrollView horizontal showsHorizontalScrollIndicator>
+              {historyView === 'mileage' ? (
+                <View style={[styles.tableCard, { backgroundColor: palette.card }]}>
+                <View style={styles.tableRow}>
+                  <Text style={[styles.tableHeaderCell, styles.tableDateCell, { color: palette.text }]}>
+                    Date
+                  </Text>
+                  <Text style={[styles.tableHeaderCell, styles.tableValueCell, { color: palette.text }]}>
+                    Mileage
+                  </Text>
+                  <Text style={[styles.tableHeaderCell, styles.tableRemarksCell, { color: palette.text }]}>
+                    Remarks
+                  </Text>
+                </View>
+                {mileageRows.map((row) => (
+                  <View key={row.id} style={styles.tableRow}>
+                    <Text style={[styles.tableCell, styles.tableDateCell, { color: palette.muted }]}>
+                      {String(row.reading_date)}
+                    </Text>
+                    <Text style={[styles.tableCell, styles.tableValueCell, { color: palette.muted }]}>
+                      {String(row.odometer_reading)} km
+                    </Text>
+                    <Text style={[styles.tableCell, styles.tableRemarksCell, { color: palette.muted }]}>
+                      {String(row.notes ?? '—')}
+                    </Text>
+                  </View>
+                ))}
+                </View>
+              ) : (
+                <View style={[styles.tableCard, { backgroundColor: palette.card }]}>
+                <View style={styles.tableRow}>
+                  <Text style={[styles.tableHeaderCell, styles.tableDateCell, { color: palette.text }]}>
+                    Date
+                  </Text>
+                  <Text style={[styles.tableHeaderCell, styles.tableValueCell, { color: palette.text }]}>
+                    Odometer
+                  </Text>
+                  <Text style={[styles.tableHeaderCell, styles.tableConditionCell, { color: palette.text }]}>
+                    Condition
+                  </Text>
+                  <Text style={[styles.tableHeaderCell, styles.tableRemarksCell, { color: palette.text }]}>
+                    Remarks
+                  </Text>
+                </View>
+                {inspectionRows.map((row) => (
+                  <View key={row.id} style={styles.tableRow}>
+                    <Text style={[styles.tableCell, styles.tableDateCell, { color: palette.muted }]}>
+                      {String(row.inspection_date)}
+                    </Text>
+                    <Text style={[styles.tableCell, styles.tableValueCell, { color: palette.muted }]}>
+                      {String(row.odometer_reading)} km
+                    </Text>
+                    <Text style={[styles.tableCell, styles.tableConditionCell, { color: palette.muted }]}>
+                      {String(row.overall_condition ?? '—')}
+                    </Text>
+                    <Text style={[styles.tableCell, styles.tableRemarksCell, { color: palette.muted }]}>
+                      {String(row.remarks ?? '—')}
+                    </Text>
+                  </View>
+                ))}
+                </View>
+              )}
+            </ScrollView>
+          </ScrollView>
+        </View>
+      </Modal>
+    </Panel>
+  );
+}
+
+function Fuel({
+  vehicles,
+  canManage,
+  userId,
+  palette,
+}: {
+  vehicles: VehicleRecord[];
+  canManage: boolean;
+  userId: string;
+  palette: { bg: string; card: string; text: string; muted: string };
+}) {
+  const [vehicleId, setVehicleId] = useState('');
+  const [fuelType, setFuelType] = useState<'Petrol' | 'Diesel'>('Petrol');
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [litres, setLitres] = useState('');
+  const [costPerLitre, setCostPerLitre] = useState('');
+  const [odometer, setOdometer] = useState('');
+  const [fuelStation, setFuelStation] = useState('');
+  const [notes, setNotes] = useState('');
+  const [receiptUri, setReceiptUri] = useState('');
+  const [fuelTypeOpen, setFuelTypeOpen] = useState(false);
+  const [vehicleOpen, setVehicleOpen] = useState(false);
+  const [rows, setRows] = useState<RecordRow[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const selectedVehicle = vehicles.find((vehicle) => vehicle.id === vehicleId);
+  const totalCost = Number.parseFloat(litres) * Number.parseFloat(costPerLitre);
+
+  const loadRecords = async () => {
+    const { data, error } = await supabase
+      .from('fuel_records')
+      .select(
+        'id, vehicle_id, refuel_date, fuel_type, litres, cost_per_litre, total_cost, odometer_reading, fuel_station, receipt_path, notes',
+      )
+      .order('refuel_date', { ascending: false });
+    if (error) {
+      Alert.alert('Unable to load fuel records', error.message);
+      return;
+    }
+    setRows((data ?? []) as RecordRow[]);
+  };
+  useEffect(() => {
+    void loadRecords();
+  }, []);
+
+  const save = async () => {
+    if (!canManage) return;
+    const litresValue = Number.parseFloat(litres);
+    const priceValue = Number.parseFloat(costPerLitre);
+    const odometerValue = odometer ? Number.parseFloat(odometer) : null;
+    if (
+      !vehicleId ||
+      !date ||
+      date > new Date().toISOString().slice(0, 10) ||
+      !Number.isFinite(litresValue) ||
+      litresValue <= 0 ||
+      !Number.isFinite(priceValue) ||
+      priceValue < 0 ||
+      (odometer && (!Number.isFinite(odometerValue) || (odometerValue ?? 0) < 0))
+    ) {
+      Alert.alert(
+        'Required',
+        'Select a vehicle, choose a valid past or current date, and enter valid litres and cost per litre.',
+      );
+      return;
+    }
+    try {
+      let receiptPath: string | null = null;
+      if (receiptUri) {
+        receiptPath = `${vehicleId}/fuel/${Date.now()}-${receiptUri.split('/').pop() ?? 'receipt'}`;
+        const normalizedUri = await normalizeImage(receiptUri);
+        const file = await new FileSystem.File(normalizedUri).bytes();
+        const { error: uploadError } = await supabase.storage
+          .from('vehicle-documents')
+          .upload(receiptPath, file, { upsert: false, contentType: 'image/jpeg' });
+        if (uploadError) throw uploadError;
+      }
+      const { error } = await supabase.from('fuel_records').insert({
+        vehicle_id: vehicleId,
+        recorded_by: userId,
+        refuel_date: date,
+        fuel_type: fuelType,
+        litres: litresValue,
+        cost_per_litre: priceValue,
+        total_cost: Number(totalCost.toFixed(2)),
+        odometer_reading: odometerValue,
+        fuel_station: fuelStation || null,
+        receipt_path: receiptPath,
+        notes: notes || null,
+      });
+      if (error) throw error;
+      setLitres('');
+      setCostPerLitre('');
+      setOdometer('');
+      setFuelStation('');
+      setNotes('');
+      setReceiptUri('');
+      await loadRecords();
+      Alert.alert('Saved', 'Fuel record added.');
+    } catch (error) {
+      Alert.alert('Unable to save fuel record', error instanceof Error ? error.message : 'Please try again.');
+    }
+  };
+
+  const visibleRows = rows.filter((row) => row.vehicle_id === vehicleId);
+  return (
+    <Panel>
+      <View style={styles.operationsIntro}>
+        <Heading palette={palette}>Fuel and refuelling</Heading>
+        <Text style={{ color: palette.muted }}>
+          Record each refuelling event against the exact vehicle.
+        </Text>
+      </View>
+      {!canManage && <Text style={{ color: palette.muted }}>Management access is read-only.</Text>}
+      <View style={styles.dropdownWrap}>
+        <Text style={[styles.fieldLabel, { color: palette.muted }]}>Vehicle</Text>
+        <Pressable
+          style={[styles.dropdownButton, { backgroundColor: palette.card }]}
+          onPress={() => setVehicleOpen(!vehicleOpen)}
+        >
+          <Text style={{ color: selectedVehicle ? palette.text : palette.muted }}>
+            {selectedVehicle
+              ? `${vehicleIcon(selectedVehicle.vehicle_type)}  ${selectedVehicle.make} ${selectedVehicle.model} · ${selectedVehicle.registration_number}`
+              : 'Select a registered vehicle'}
+          </Text>
+          <Text style={{ color: palette.muted }}>{vehicleOpen ? '⌃' : '⌄'}</Text>
+        </Pressable>
+        {vehicleOpen && (
+          <View style={[styles.dropdownList, { backgroundColor: palette.card }]}>
+            {vehicles.map((vehicle) => (
+              <Pressable
+                key={vehicle.id}
+                style={styles.dropdownOption}
+                onPress={() => {
+                  setVehicleId(vehicle.id);
+                  setVehicleOpen(false);
+                }}
+              >
+                <Text style={styles.vehicleTypeIcon}>{vehicleIcon(vehicle.vehicle_type)}</Text>
+                <View style={styles.vehicleListCopy}>
+                  <Text style={{ color: palette.text, fontWeight: '800' }}>
+                    {vehicle.make} {vehicle.model}
+                  </Text>
+                  <Text style={{ color: palette.muted }}>{vehicle.registration_number}</Text>
+                </View>
+              </Pressable>
+            ))}
+          </View>
+        )}
+      </View>
+      {selectedVehicle && selectedVehicle.energy_type !== 'fuel' && (
+        <View style={[styles.detailCard, { backgroundColor: palette.card }]}>
+          <Text style={[styles.detailSectionTitle, { color: palette.text }]}>
+            Refuelling is not applicable
+          </Text>
+          <Text style={{ color: palette.muted }}>
+            This vehicle is registered as electric, so fuel records cannot be added.
+          </Text>
+        </View>
+      )}
+      {selectedVehicle?.energy_type === 'fuel' && (
+        <View style={[styles.updateForm, { backgroundColor: palette.card }]}>
+          <DatePickerField label="Refuelling date" value={date} onChange={setDate} palette={palette} />
+          <View style={styles.dropdownWrap}>
+            <Text style={[styles.fieldLabel, { color: palette.muted }]}>Fuel type</Text>
+            <Pressable
+              style={[styles.dropdownButton, { backgroundColor: palette.card }]}
+              onPress={() => setFuelTypeOpen(!fuelTypeOpen)}
+            >
+              <Text style={{ color: palette.text }}>{fuelType}</Text>
+              <Text style={{ color: palette.muted }}>{fuelTypeOpen ? '⌃' : '⌄'}</Text>
+            </Pressable>
+            {fuelTypeOpen && (
+              <View style={[styles.dropdownList, { backgroundColor: palette.card }]}>
+                {(['Petrol', 'Diesel'] as const).map((option) => (
+                  <Pressable
+                    key={option}
+                    style={styles.dropdownOption}
+                    onPress={() => {
+                      setFuelType(option);
+                      setFuelTypeOpen(false);
+                    }}
+                  >
+                    <Text style={{ color: palette.text }}>{option}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            )}
+          </View>
+          <Field
+            label="Quantity (litres)"
+            value={litres}
+            onChange={setLitres}
+            palette={palette}
+            keyboardType="decimal-pad"
+          />
+          <Field
+            label="Cost per litre (LKR)"
+            value={costPerLitre}
+            onChange={setCostPerLitre}
+            palette={palette}
+            keyboardType="decimal-pad"
+          />
+          <View style={[styles.totalCostBox, { backgroundColor: palette.bg }]}>
+            <Text style={{ color: palette.muted }}>Total cost</Text>
+            <Text style={[styles.historyValue, { color: palette.text }]}>
+              LKR {Number.isFinite(totalCost) ? totalCost.toFixed(2) : '0.00'}
+            </Text>
+          </View>
+          <Field
+            label="Odometer reading (km, optional)"
+            value={odometer}
+            onChange={setOdometer}
+            palette={palette}
+            keyboardType="decimal-pad"
+          />
+          <Field label="Fuel station (optional)" value={fuelStation} onChange={setFuelStation} palette={palette} />
+          <Field label="Notes (optional)" value={notes} onChange={setNotes} palette={palette} />
+          <Pressable
+            style={[styles.attachmentBox, { borderColor: colors.border }]}
+            onPress={() => void choosePhoto().then((uri) => uri && setReceiptUri(uri))}
+          >
+            {receiptUri ? (
+              <Image source={{ uri: receiptUri }} style={styles.attachmentThumbnail} />
+            ) : (
+              <Text style={styles.attachmentPlaceholder}>Upload fuel receipt</Text>
+            )}
+          </Pressable>
+          {canManage && <Button title="Save fuel record" onPress={() => void save()} />}
+        </View>
+      )}
+      {selectedVehicle?.energy_type === 'fuel' && (
+        <View style={styles.fuelHistorySection}>
+          <View style={styles.historyHeader}>
+            <Text style={[styles.detailSectionTitle, { color: palette.text }]}>Latest refuelling</Text>
+            <Text style={[styles.sectionHint, { color: palette.muted }]}>Current vehicle</Text>
+          </View>
+          {visibleRows.length ? (
+            <View style={[styles.historyCard, { backgroundColor: palette.card }]}>
+              <Text style={[styles.historyValue, { color: palette.text }]}>
+                {String(visibleRows[0].refuel_date)} · {String(visibleRows[0].fuel_type)}
+              </Text>
+              <Text style={{ color: palette.muted }}>
+                {String(visibleRows[0].litres)} L · LKR {String(visibleRows[0].cost_per_litre)}/L · Total LKR{' '}
+                {String(visibleRows[0].total_cost)}
+              </Text>
+              <Text style={{ color: palette.muted }}>
+                Odometer: {visibleRows[0].odometer_reading == null ? '—' : `${String(visibleRows[0].odometer_reading)} km`}
+              </Text>
+              {visibleRows[0].fuel_station ? (
+                <Text style={{ color: palette.muted }}>Station: {String(visibleRows[0].fuel_station)}</Text>
+              ) : null}
+              <Button
+                title="View previous refuelling"
+                variant="secondary"
+                onPress={() => setShowHistory(true)}
+              />
+            </View>
+          ) : (
+            <Text style={{ color: palette.muted }}>No fuel records for this vehicle.</Text>
+          )}
+        </View>
+      )}
+      <Modal visible={showHistory} animationType="slide" onRequestClose={() => setShowHistory(false)}>
+        <View style={[styles.modalPage, { backgroundColor: palette.bg }]}>
+          <View style={styles.modalHeader}>
+            <View>
+              <Text style={[styles.vehicleDetailTitle, { color: palette.text }]}>Refuelling history</Text>
+              <Text style={{ color: palette.muted }}>{selectedVehicle?.registration_number}</Text>
+            </View>
+          </View>
+          <ScrollView contentContainerStyle={styles.panel}>
+            <ScrollView horizontal showsHorizontalScrollIndicator>
+              <View style={[styles.tableCard, styles.fuelTableCard, { backgroundColor: palette.card }]}>
+                <View style={styles.tableRow}>
+                  {[
+                    { label: 'Date', style: styles.tableDateCell },
+                    { label: 'Fuel type', style: styles.tableFuelTypeCell },
+                    { label: 'Litres', style: styles.tableFuelNumberCell },
+                    { label: 'Cost/L', style: styles.tableFuelNumberCell },
+                    { label: 'Total', style: styles.tableFuelNumberCell },
+                    { label: 'Odometer', style: styles.tableFuelNumberCell },
+                    { label: 'Station', style: styles.tableFuelStationCell },
+                  ].map(({ label, style }) => (
+                    <Text key={label} style={[styles.tableHeaderCell, style, { color: palette.text }]}>
+                      {label}
+                    </Text>
+                  ))}
+                </View>
+                {visibleRows.map((row) => (
+                  <View key={row.id} style={styles.tableRow}>
+                    <Text style={[styles.tableCell, styles.tableDateCell, { color: palette.muted }]}>
+                      {String(row.refuel_date)}
+                    </Text>
+                    <Text style={[styles.tableCell, styles.tableFuelTypeCell, { color: palette.muted }]}>
+                      {String(row.fuel_type)}
+                    </Text>
+                    <Text style={[styles.tableCell, styles.tableFuelNumberCell, { color: palette.muted }]}>
+                      {String(row.litres)} L
+                    </Text>
+                    <Text style={[styles.tableCell, styles.tableFuelNumberCell, { color: palette.muted }]}>
+                      LKR {String(row.cost_per_litre)}
+                    </Text>
+                    <Text style={[styles.tableCell, styles.tableFuelNumberCell, { color: palette.muted }]}>
+                      LKR {String(row.total_cost)}
+                    </Text>
+                    <Text style={[styles.tableCell, styles.tableFuelNumberCell, { color: palette.muted }]}>
+                      {row.odometer_reading == null ? '—' : `${String(row.odometer_reading)} km`}
+                    </Text>
+                    <Text style={[styles.tableCell, styles.tableFuelStationCell, { color: palette.muted }]}>
+                      {String(row.fuel_station ?? '—')}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            </ScrollView>
+          </ScrollView>
+        </View>
+      </Modal>
     </Panel>
   );
 }
@@ -924,7 +1740,7 @@ function Compliance({
   palette: { bg: string; card: string; text: string; muted: string };
 }) {
   const [vehicleId, setVehicleId] = useState('');
-  const [type, setType] = useState('Revenue Licence');
+  const [type, setType] = useState('');
   const [issue, setIssue] = useState('');
   const [expiry, setExpiry] = useState('');
   const [reference, setReference] = useState('');
@@ -932,20 +1748,32 @@ function Compliance({
   const [rows, setRows] = useState<RecordRow[]>([]);
   const [view, setView] = useState<string | null>(null);
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [typeOpen, setTypeOpen] = useState(false);
   const selectedVehicle = vehicles.find((vehicle) => vehicle.id === vehicleId);
+  const complianceTypes =
+    selectedVehicle?.energy_type === 'electric'
+      ? ['Revenue Licence', 'Insurance']
+      : ['Revenue Licence', 'Emission Test', 'Insurance'];
   const load = async () => {
     const { data } = await supabase
       .from('compliance_records')
       .select(
-        'id, vehicle_id, compliance_type, issue_date, expiry_date, reference_number, status, file_path',
+        'id, vehicle_id, compliance_type, issue_date, expiry_date, reference_number, status, file_path, updated_at, created_at',
       )
-      .order('expiry_date');
+      .order('updated_at', { ascending: false });
     setRows((data ?? []) as RecordRow[]);
   };
   useEffect(() => {
     void load();
   }, []);
   useEffect(() => {
+    if (!type) {
+      setIssue('');
+      setExpiry('');
+      setReference('');
+      setFileUri('');
+      return;
+    }
     const existing = rows.find(
       (row) => row.vehicle_id === vehicleId && row.compliance_type === type,
     );
@@ -954,27 +1782,49 @@ function Compliance({
     setReference(String(existing?.reference_number ?? ''));
     setFileUri('');
   }, [vehicleId, type, rows]);
-  const visibleRows = rows.filter((row) => row.vehicle_id === vehicleId);
   const save = async () => {
-    if (!canManage || !vehicleId) {
+    if (!canManage || !vehicleId || !type) {
       Alert.alert('Required', 'Select a vehicle before saving compliance.');
       return;
     }
-    const { data: existing } = await supabase
+    if (selectedVehicle?.energy_type === 'electric' && type === 'Emission Test') {
+      Alert.alert('Not applicable', 'Electric vehicles do not require an emission test.');
+      return;
+    }
+    if (!fileUri) {
+      Alert.alert('Photo evidence required', 'Upload a certificate photo before saving this record.');
+      return;
+    }
+    const { data: existingRecords, error: existingError } = await supabase
       .from('compliance_records')
-      .select('id, file_path')
+      .select('id, file_path, expiry_date')
       .eq('vehicle_id', vehicleId)
       .eq('compliance_type', type)
-      .maybeSingle();
+      .order('expiry_date', { ascending: false });
+    if (existingError) {
+      Alert.alert('Unable to check existing compliance', existingError.message);
+      return;
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    const activeRecord = (existingRecords ?? []).find(
+      (record) => record.expiry_date && String(record.expiry_date) >= today,
+    );
+    if (activeRecord) {
+      Alert.alert(
+        'Certificate still valid',
+        `${type} cannot be added again until the existing certificate expires.`,
+      );
+      return;
+    }
     let uploadedPath: string | null = null;
     try {
       if (fileUri) {
         uploadedPath = `${vehicleId}/compliance-${Date.now()}-${fileUri.split('/').pop() ?? 'certificate'}`;
-        const response = await fetch(fileUri);
-        const blob = await response.blob();
+        const normalizedUri = await normalizeImage(fileUri);
+        const file = await new FileSystem.File(normalizedUri).bytes();
         const { error: uploadError } = await supabase.storage
           .from('vehicle-documents')
-          .upload(uploadedPath, blob, { upsert: false });
+          .upload(uploadedPath, file, { upsert: false, contentType: 'image/jpeg' });
         if (uploadError) throw uploadError;
       }
       const values = {
@@ -986,13 +1836,8 @@ function Compliance({
         status: expiry && expiry < new Date().toISOString().slice(0, 10) ? 'expired' : 'active',
         ...(uploadedPath ? { file_path: uploadedPath } : {}),
       };
-      const result = existing
-        ? await supabase.from('compliance_records').update(values).eq('id', existing.id)
-        : await supabase.from('compliance_records').insert(values);
+      const result = await supabase.from('compliance_records').insert(values);
       if (result.error) throw result.error;
-      if (uploadedPath && existing?.file_path) {
-        await supabase.storage.from('vehicle-documents').remove([String(existing.file_path)]);
-      }
       setFileUri('');
       await load();
       Alert.alert('Saved', `${type} compliance record saved.`);
@@ -1030,6 +1875,8 @@ function Compliance({
                 style={styles.dropdownOption}
                 onPress={() => {
                   setVehicleId(vehicle.id);
+                  setType('');
+                  setTypeOpen(false);
                   setDropdownOpen(false);
                 }}
               >
@@ -1052,71 +1899,78 @@ function Compliance({
       ) : (
         <>
           <View style={[styles.updateForm, { backgroundColor: palette.card }]}>
-            <Text style={[styles.detailSectionTitle, { color: palette.text }]}>
-              1. Choose certificate type
-            </Text>
-            <View style={styles.pickerWrap}>
-              {['Revenue Licence', 'Emission Test', 'Insurance'].map((v) => (
-                <Pressable
-                  key={v}
-                  onPress={() => setType(v)}
-                  style={[
-                    styles.picker,
-                    { backgroundColor: type === v ? colors.red : palette.bg },
-                  ]}
-                >
-                  <Text style={{ color: type === v ? '#fff' : palette.text }}>{v}</Text>
-                </Pressable>
-              ))}
-            </View>
-            <Text style={[styles.detailSectionTitle, { color: palette.text }]}>
-              2. Enter certificate details
-            </Text>
-            <Field label="Issue date" value={issue} onChange={setIssue} palette={palette} />
-            <Field label="Expiry date" value={expiry} onChange={setExpiry} palette={palette} />
-            <Field
-              label="Reference number"
-              value={reference}
-              onChange={setReference}
-              palette={palette}
-            />
-            {canManage && (
+            <Text style={[styles.fieldLabel, { color: palette.muted }]}>Certificate type</Text>
+            <Pressable
+              style={[styles.dropdownButton, { backgroundColor: palette.card }]}
+              onPress={() => setTypeOpen(!typeOpen)}
+            >
+              <Text style={{ color: type ? palette.text : palette.muted }}>
+                {type || 'Select certificate type'}
+              </Text>
+              <Text style={{ color: palette.muted }}>{typeOpen ? '⌃' : '⌄'}</Text>
+            </Pressable>
+            {typeOpen && (
+              <View style={[styles.dropdownList, { backgroundColor: palette.card }]}>
+                {complianceTypes.map((option) => (
+                  <Pressable
+                    key={option}
+                    style={styles.dropdownOption}
+                    onPress={() => {
+                      setType(option);
+                      setTypeOpen(false);
+                    }}
+                  >
+                    <Text style={{ color: palette.text }}>{option}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            )}
+            {type ? (
               <>
-                <Button
-                  title={fileUri ? 'Replace certificate photo' : 'Choose certificate photo'}
-                  onPress={() => void choosePhoto().then((uri) => uri && setFileUri(uri))}
+                <Text style={[styles.detailSectionTitle, { color: palette.text }]}>
+                  {type} details
+                </Text>
+                <DatePickerField label="Issued date" value={issue} onChange={setIssue} palette={palette} />
+                <DatePickerField
+                  label="Expiry date"
+                  value={expiry}
+                  onChange={setExpiry}
+                  palette={palette}
+                  allowFuture
                 />
-                {fileUri ? (
-                  <Text style={{ color: palette.muted }}>Certificate photo selected.</Text>
-                ) : null}
-                <Button title="Save compliance certificate" onPress={() => void save()} />
+                <Field
+                  label="Reference number"
+                  value={reference}
+                  onChange={setReference}
+                  palette={palette}
+                />
+                {canManage && (
+                  <>
+                    <Pressable
+                      style={[styles.attachmentBox, { borderColor: colors.border }]}
+                      onPress={() => void choosePhoto().then((uri) => uri && setFileUri(uri))}
+                    >
+                      {fileUri ? (
+                        <Image source={{ uri: fileUri }} style={styles.attachmentThumbnail} />
+                      ) : (
+                        <Text style={styles.attachmentPlaceholder}>Upload certificate</Text>
+                      )}
+                    </Pressable>
+                    <Button title="Save compliance certificate" onPress={() => void save()} />
+                  </>
+                )}
               </>
+            ) : (
+              <Text style={{ color: palette.muted }}>Select a certificate type to enter its details.</Text>
             )}
           </View>
         </>
       )}
-      {selectedVehicle && visibleRows.map((r) => (
-        <View key={r.id} style={[styles.card, { backgroundColor: palette.card }]}>
-          <Text style={{ color: palette.text }}>
-            {String(r.compliance_type)} · {String(r.expiry_date ?? 'No expiry')} ·{' '}
-            {String(r.status)}
-          </Text>
-          <Text style={{ color: palette.muted }}>
-            {String(r.reference_number ?? 'No reference')}
-          </Text>
-          {r.file_path ? (
-            <Button title="View certificate" onPress={() => setView(String(r.file_path))} />
-          ) : (
-            <Text style={{ color: palette.muted }}>No certificate uploaded.</Text>
-          )}
-        </View>
-      ))}
       <Modal visible={!!view} transparent animationType="fade" onRequestClose={() => setView(null)}>
         <View style={styles.overlay}>
           <View style={[styles.viewer, { backgroundColor: palette.card }]}>
             <Heading palette={palette}>Compliance certificate</Heading>
             {view ? <SignedContent path={view} /> : null}
-            <Button title="Close" onPress={() => setView(null)} />
           </View>
         </View>
       </Modal>
@@ -1127,131 +1981,405 @@ function Compliance({
 function Maintenance({
   vehicles,
   canManage,
+  userId,
   palette,
 }: {
   vehicles: VehicleRecord[];
   canManage: boolean;
-  palette: { card: string; text: string; muted: string };
+  userId: string;
+  palette: { bg: string; card: string; text: string; muted: string };
 }) {
   const [vehicleId, setVehicleId] = useState('');
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [serviceDate, setServiceDate] = useState(new Date().toISOString().slice(0, 10));
+  const [handoverDate, setHandoverDate] = useState('');
+  const [retrievalDate, setRetrievalDate] = useState('');
   const [odometer, setOdometer] = useState('');
   const [serviceType, setServiceType] = useState('Preventive service');
+  const [serviceTypeOpen, setServiceTypeOpen] = useState(false);
   const [description, setDescription] = useState('');
   const [serviceStation, setServiceStation] = useState('');
-  const [provider, setProvider] = useState('');
   const [cost, setCost] = useState('');
-  const [receiptUri, setReceiptUri] = useState('');
+  const [attachmentUris, setAttachmentUris] = useState<string[]>([]);
   const [rows, setRows] = useState<RecordRow[]>([]);
+  const [attachments, setAttachments] = useState<RecordRow[]>([]);
   const [view, setView] = useState<string | null>(null);
+  const [showForm, setShowForm] = useState(true);
+  const [showHistory, setShowHistory] = useState(false);
+  const selectedVehicle = vehicles.find((vehicle) => vehicle.id === vehicleId);
   const load = async () => {
-    const { data } = await supabase
+    const maintenance = await supabase
       .from('maintenance_records')
       .select(
-        'id, vehicle_id, service_date, odometer_reading, service_type, description, service_station, provider, cost, document_path',
+        'id, vehicle_id, service_date, handover_date, retrieval_date, odometer_reading, service_type, description, service_station, cost, document_path',
       )
       .order('service_date', { ascending: false });
-    setRows((data ?? []) as RecordRow[]);
+    let maintenanceData = maintenance.data as RecordRow[] | null;
+    if (maintenance.error) {
+      const legacyMaintenance = await supabase
+        .from('maintenance_records')
+        .select(
+          'id, vehicle_id, service_date, odometer_reading, service_type, description, provider, cost, document_path',
+        )
+        .order('service_date', { ascending: false });
+      if (legacyMaintenance.error) {
+        Alert.alert('Unable to load maintenance records', legacyMaintenance.error.message);
+        return;
+      }
+      maintenanceData = (legacyMaintenance.data ?? []).map((row) => ({
+        ...(row as RecordRow),
+        service_station: row.provider ?? null,
+      }));
+    }
+    if (!maintenanceData) {
+      Alert.alert('Unable to load maintenance records', 'No maintenance records were returned.');
+      return;
+    }
+    setRows(maintenanceData);
+    const maintenanceAttachments = await supabase
+      .from('maintenance_attachments')
+      .select('id, maintenance_record_id, vehicle_id, attachment_type, file_path, created_at')
+      .order('created_at', { ascending: false });
+    setAttachments(
+      maintenanceAttachments.error ? [] : ((maintenanceAttachments.data ?? []) as RecordRow[]),
+    );
   };
   useEffect(() => {
     void load();
   }, []);
   const save = async () => {
     if (!canManage) return;
-    if (!vehicleId || !date || !odometer || !serviceStation) {
-      Alert.alert('Required', 'Vehicle, date, odometer, and service station / garage are required.');
+    if (!vehicleId || !serviceDate || !handoverDate || !odometer || !serviceStation) {
+      Alert.alert(
+        'Required',
+        'Vehicle, service date, handover date, odometer, and service station are required.',
+      );
       return;
     }
-    let receiptPath: string | null = null;
+    if (retrievalDate && retrievalDate < handoverDate) {
+      Alert.alert('Invalid dates', 'Retrieval date cannot be before the handover date.');
+      return;
+    }
+    const odometerValue = Number.parseFloat(odometer);
+    const costValue = cost.trim() ? Number.parseFloat(cost) : null;
+    if (!Number.isFinite(odometerValue) || odometerValue < 0) {
+      Alert.alert('Invalid odometer', 'Enter a valid odometer reading in kilometres.');
+      return;
+    }
+    if (costValue !== null && (!Number.isFinite(costValue) || costValue < 0)) {
+      Alert.alert('Invalid cost', 'Enter a valid cost in LKR.');
+      return;
+    }
+    const attachmentPaths: string[] = [];
+    let maintenanceId = '';
+    let schemaWarning = false;
     try {
-      if (receiptUri) {
-        receiptPath = `${vehicleId}/maintenance-${Date.now()}-${receiptUri.split('/').pop() ?? 'receipt'}`;
-        const response = await fetch(receiptUri);
-        const blob = await response.blob();
+      const modernInsert = await supabase
+        .from('maintenance_records')
+        .insert({
+          vehicle_id: vehicleId,
+          service_date: serviceDate,
+          handover_date: handoverDate,
+          retrieval_date: retrievalDate || null,
+          odometer_reading: odometerValue,
+          service_type: serviceType,
+          description,
+          service_station: serviceStation,
+          cost: costValue,
+        })
+        .select('id')
+        .single();
+      if (modernInsert.error) {
+        if (!isMissingSchemaField(modernInsert.error.message)) throw modernInsert.error;
+        const legacyInsert = await supabase
+          .from('maintenance_records')
+          .insert({
+            vehicle_id: vehicleId,
+            service_date: serviceDate,
+            odometer_reading: odometerValue,
+            service_type: serviceType,
+            description,
+            provider: serviceStation,
+            cost: costValue,
+          })
+          .select('id')
+          .single();
+        if (legacyInsert.error) throw legacyInsert.error;
+        maintenanceId = String(legacyInsert.data.id);
+        schemaWarning = true;
+      } else {
+        maintenanceId = String(modernInsert.data.id);
+      }
+      for (const attachmentUri of schemaWarning ? [] : attachmentUris) {
+        const attachmentPath = `${vehicleId}/maintenance/${maintenanceId}/${Date.now()}-${attachmentUri.split('/').pop() ?? 'attachment'}`;
+        attachmentPaths.push(attachmentPath);
+        const normalizedUri = await normalizeImage(attachmentUri);
+        const file = await new FileSystem.File(normalizedUri).bytes();
         const { error: uploadError } = await supabase.storage
           .from('vehicle-documents')
-          .upload(receiptPath, blob, { upsert: false });
+          .upload(attachmentPath, file, {
+            upsert: false,
+            contentType: 'image/jpeg',
+          });
         if (uploadError) throw uploadError;
+        const { error: attachmentError } = await supabase
+          .from('maintenance_attachments')
+          .insert({
+            maintenance_record_id: maintenanceId,
+            vehicle_id: vehicleId,
+            attachment_type: 'Receipt',
+            file_path: attachmentPath,
+            uploaded_by: userId,
+          });
+        if (attachmentError) {
+          if (!isMissingSchemaField(attachmentError.message)) throw attachmentError;
+          await supabase.storage.from('vehicle-documents').remove([attachmentPath]);
+          attachmentPaths.pop();
+          schemaWarning = true;
+        }
       }
-      const { error } = await supabase.from('maintenance_records').insert({
-        vehicle_id: vehicleId,
-        service_date: date,
-        odometer_reading: Number(odometer),
-        service_type: serviceType,
-        description,
-        service_station: serviceStation,
-        provider,
-        cost: cost ? Number(cost) : null,
-        document_path: receiptPath,
-      });
-      if (error) throw error;
-      setReceiptUri('');
+      if (attachmentPaths.length) {
+        const { error: pathError } = await supabase
+          .from('maintenance_records')
+          .update({ document_path: attachmentPaths[0] })
+          .eq('id', maintenanceId);
+        if (pathError) throw pathError;
+      }
+      setAttachmentUris([]);
       await load();
-      Alert.alert('Saved', 'Maintenance record added.');
+      setShowForm(false);
+      Alert.alert(
+        'Saved',
+        schemaWarning
+          ? 'Maintenance record saved. Apply the latest database migrations to store service dates and attachments.'
+          : 'Maintenance record added.',
+      );
     } catch (e) {
-      if (receiptPath) await supabase.storage.from('vehicle-documents').remove([receiptPath]);
+      if (attachmentPaths.length)
+        await supabase.storage.from('vehicle-documents').remove(attachmentPaths);
+      if (maintenanceId) await supabase.from('maintenance_records').delete().eq('id', maintenanceId);
       Alert.alert('Unable to save maintenance', e instanceof Error ? e.message : 'Try again.');
     }
   };
+  const visibleRows = rows.filter((row) => row.vehicle_id === vehicleId);
   return (
     <Panel>
       <Heading palette={palette}>Maintenance and repairs</Heading>
       {!canManage && <Text style={{ color: palette.muted }}>Management access is read-only.</Text>}
-      <VehiclePicker
-        vehicles={vehicles}
-        value={vehicleId}
-        onChange={setVehicleId}
-        palette={palette}
-      />
-      {[
-        ['Service date', date, setDate],
-        ['Odometer', odometer, setOdometer],
-        ['Service type', serviceType, setServiceType],
-        ['Service station / garage', serviceStation, setServiceStation],
-        ['Description', description, setDescription],
-        ['Provider', provider, setProvider],
-        ['Cost', cost, setCost],
-      ].map(([label, value, setter]) => (
-        <Field
-          key={String(label)}
-          label={String(label)}
-          value={String(value)}
-          onChange={setter as (v: string) => void}
-          palette={palette}
-        />
-      ))}
-      {canManage && (
-        <>
-          <Button
-            title={receiptUri ? 'Replace receipt photo' : 'Choose receipt photo'}
-            onPress={() => void choosePhoto().then((uri) => uri && setReceiptUri(uri))}
+      <View style={styles.dropdownWrap}>
+        <Text style={[styles.fieldLabel, { color: palette.muted }]}>Vehicle</Text>
+        <Pressable
+          style={[styles.dropdownButton, { backgroundColor: palette.card }]}
+          onPress={() => setDropdownOpen(!dropdownOpen)}
+        >
+          <Text style={{ color: selectedVehicle ? palette.text : palette.muted }}>
+            {selectedVehicle
+              ? `${vehicleIcon(selectedVehicle.vehicle_type)}  ${selectedVehicle.make} ${selectedVehicle.model} · ${selectedVehicle.registration_number}`
+              : 'Select a registered vehicle'}
+          </Text>
+          <Text style={{ color: palette.muted }}>{dropdownOpen ? '⌃' : '⌄'}</Text>
+        </Pressable>
+        {dropdownOpen && (
+          <View style={[styles.dropdownList, { backgroundColor: palette.card }]}>
+            {vehicles.map((vehicle) => (
+              <Pressable
+                key={vehicle.id}
+                style={styles.dropdownOption}
+                onPress={() => {
+                  setVehicleId(vehicle.id);
+                  setAttachmentUris([]);
+                  setShowForm(true);
+                  setDropdownOpen(false);
+                }}
+              >
+                <Text style={styles.vehicleTypeIcon}>{vehicleIcon(vehicle.vehicle_type)}</Text>
+                <View style={styles.vehicleListCopy}>
+                  <Text style={{ color: palette.text, fontWeight: '800' }}>
+                    {vehicle.make} {vehicle.model}
+                  </Text>
+                  <Text style={{ color: palette.muted }}>{vehicle.registration_number}</Text>
+                </View>
+              </Pressable>
+            ))}
+          </View>
+        )}
+      </View>
+      {!selectedVehicle ? (
+        <Text style={{ color: palette.muted }}>
+          Choose a vehicle to add or view its maintenance records.
+        </Text>
+      ) : showForm ? (
+        <View style={[styles.updateForm, { backgroundColor: palette.card }]}>
+          <DatePickerField
+            label="Work completed on"
+            value={serviceDate}
+            onChange={setServiceDate}
+            palette={palette}
           />
-          {receiptUri ? <Text style={{ color: palette.muted }}>Receipt photo selected.</Text> : null}
-        </>
-      )}
-      {canManage && <Button title="Save maintenance" onPress={() => void save()} />}
-      {rows.map((r) => (
-        <View key={r.id} style={[styles.card, { backgroundColor: palette.card }]}>
-          <Text style={{ color: palette.text }}>
-            {String(r.service_date)} · {String(r.service_type)}
-          </Text>
-          <Text style={{ color: palette.muted }}>
-            {String(r.service_station ?? '')} · {String(r.provider ?? '')} ·{' '}
-            {String(r.cost ?? '')}
-          </Text>
-          {r.document_path ? (
-            <Button title="View receipt" onPress={() => setView(String(r.document_path))} />
-          ) : (
-            <Text style={{ color: palette.muted }}>No receipt uploaded.</Text>
+          <DatePickerField
+            label="Sent to service on"
+            value={handoverDate}
+            onChange={setHandoverDate}
+            palette={palette}
+          />
+          <DatePickerField
+            label="Returned from service on (optional)"
+            value={retrievalDate}
+            onChange={setRetrievalDate}
+            palette={palette}
+          />
+          <Field
+            label="What was repaired or serviced?"
+            value={description}
+            onChange={setDescription}
+            palette={palette}
+          />
+          <View style={styles.dropdownWrap}>
+            <Text style={[styles.fieldLabel, { color: palette.muted }]}>Service type</Text>
+            <Pressable
+              style={[styles.dropdownButton, { backgroundColor: palette.card }]}
+              onPress={() => setServiceTypeOpen(!serviceTypeOpen)}
+            >
+              <Text style={{ color: palette.text }}>{serviceType}</Text>
+              <Text style={{ color: palette.muted }}>{serviceTypeOpen ? '⌃' : '⌄'}</Text>
+            </Pressable>
+            {serviceTypeOpen && (
+              <View style={[styles.dropdownList, { backgroundColor: palette.card }]}>
+                {['Minor service', 'Full (standard) service', 'Major service', 'Repair', 'Inspection'].map(
+                  (option) => (
+                    <Pressable
+                      key={option}
+                      style={styles.dropdownOption}
+                      onPress={() => {
+                        setServiceType(option);
+                        setServiceTypeOpen(false);
+                      }}
+                    >
+                      <Text style={{ color: palette.text }}>{option}</Text>
+                    </Pressable>
+                  ),
+                )}
+              </View>
+            )}
+          </View>
+          <Field
+            label="Odometer reading (km)"
+            value={odometer}
+            onChange={setOdometer}
+            palette={palette}
+            keyboardType="decimal-pad"
+          />
+          <Field
+            label="Service station / garage"
+            value={serviceStation}
+            onChange={setServiceStation}
+            palette={palette}
+          />
+          <Field
+            label="Cost (LKR)"
+            value={cost}
+            onChange={setCost}
+            palette={palette}
+            keyboardType="decimal-pad"
+          />
+          {canManage && (
+            <Pressable
+              style={[styles.attachmentBox, { borderColor: colors.border }]}
+              onPress={() =>
+                void choosePhoto().then(
+                  (uri) => uri && setAttachmentUris((current) => [...current, uri]),
+                )
+              }
+            >
+              <View style={styles.attachmentPicker}>
+                {attachmentUris.length ? (
+                  <ScrollView horizontal contentContainerStyle={styles.attachmentGallery}>
+                    {attachmentUris.map((uri) => (
+                      <Image key={uri} source={{ uri }} style={styles.attachmentThumbnail} />
+                    ))}
+                    <View style={styles.attachmentAddTile}>
+                      <Text style={styles.attachmentAddText}>+</Text>
+                    </View>
+                  </ScrollView>
+                ) : (
+                  <Text style={styles.attachmentPlaceholder}>Upload invoice</Text>
+                )}
+              </View>
+            </Pressable>
+          )}
+          {canManage && <Button title="Save maintenance record" onPress={() => void save()} />}
+        </View>
+      ) : null}
+      {selectedVehicle && (
+        <View style={styles.recordActions}>
+          <Button
+            title="View previous records"
+            variant="secondary"
+            onPress={() => setShowHistory(true)}
+          />
+          {canManage && (
+            <Button title="Add new record" variant="success" onPress={() => setShowForm(true)} />
           )}
         </View>
-      ))}
+      )}
+      <Modal visible={showHistory} animationType="slide" onRequestClose={() => setShowHistory(false)}>
+        <View style={[styles.modalPage, { backgroundColor: palette.bg }]}>
+          <View style={styles.modalHeader}>
+            <View>
+              <Text style={[styles.modalTitle, { color: palette.text }]}>Previous maintenance</Text>
+              <Text style={{ color: palette.muted }}>
+                {selectedVehicle?.registration_number ?? ''}
+              </Text>
+            </View>
+          </View>
+          <ScrollView contentContainerStyle={styles.panel}>
+            {visibleRows.length ? (
+              visibleRows.map((r) => (
+                <View key={r.id} style={[styles.historyRecordCard, { backgroundColor: palette.card }]}>
+                  <Text style={[styles.historyRecordTitle, { color: palette.text }]}>
+                    {String(r.service_type)} · {String(r.service_date)}
+                  </Text>
+                  <Text style={{ color: palette.muted }}>
+                    {String(r.service_station ?? 'No station')}
+                  </Text>
+                  <Text style={{ color: palette.muted }}>
+                    Sent: {String(r.handover_date ?? '—')} · Returned:{' '}
+                    {String(r.retrieval_date ?? 'Pending')}
+                  </Text>
+                  <Text style={{ color: palette.text }}>
+                    {String(r.description ?? 'No repair description')}
+                  </Text>
+                  <Text style={{ color: palette.muted }}>
+                    {r.odometer_reading == null ? '—' : `${String(r.odometer_reading)} km`} · LKR{' '}
+                    {String(r.cost ?? '0.00')}
+                  </Text>
+                  {attachments
+                    .filter((attachment) => attachment.maintenance_record_id === r.id)
+                    .map((attachment) => (
+                      <Button
+                        key={attachment.id}
+                        title={
+                          attachment.attachment_type
+                            ? `View ${String(attachment.attachment_type).toLowerCase()}`
+                            : 'View attachment'
+                        }
+                        variant="secondary"
+                        onPress={() => setView(String(attachment.file_path))}
+                      />
+                    ))}
+                </View>
+              ))
+            ) : (
+              <Text style={{ color: palette.muted }}>No previous maintenance records.</Text>
+            )}
+          </ScrollView>
+        </View>
+      </Modal>
       <Modal visible={!!view} transparent animationType="fade" onRequestClose={() => setView(null)}>
         <View style={styles.overlay}>
           <View style={[styles.viewer, { backgroundColor: palette.card }]}>
             <Heading palette={palette}>Maintenance receipt</Heading>
             {view ? <SignedContent path={view} /> : null}
-            <Button title="Close" onPress={() => setView(null)} />
           </View>
         </View>
       </Modal>
@@ -1261,20 +2389,89 @@ function Maintenance({
 
 function SignedContent({ path, gallery = false }: { path: string; gallery?: boolean }) {
   const [url, setUrl] = useState('');
+  const [error, setError] = useState('');
+  const [fallbackTried, setFallbackTried] = useState(false);
+  const loadSignedImage = async (signedUrl: string) => {
+    try {
+      setUrl(await normalizeImage(signedUrl));
+    } catch {
+      try {
+        const cachedFile = await FileSystem.File.downloadFileAsync(
+          signedUrl,
+          new FileSystem.File(
+            FileSystem.Paths.cache,
+            `vehicle-photo-${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`,
+          ),
+        );
+        setUrl(cachedFile.uri);
+      } catch {
+        setUrl(signedUrl);
+      }
+    }
+  };
+  const loadFallback = async () => {
+    setFallbackTried(true);
+    const { data, error: downloadError } = await supabase.storage
+      .from('vehicle-documents')
+      .download(path);
+    if (downloadError || !data) {
+      setError(downloadError?.message ?? 'The image could not be downloaded from storage.');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      if (typeof reader.result === 'string') {
+        setUrl(reader.result);
+      } else {
+        setError('The downloaded image could not be displayed.');
+      }
+    };
+    reader.onerror = () => setError('The downloaded image could not be displayed.');
+    reader.readAsDataURL(data);
+  };
   useEffect(() => {
+    setUrl('');
+    setError('');
+    setFallbackTried(false);
     void supabase.storage
       .from('vehicle-documents')
       .createSignedUrl(path, 300)
-      .then(({ data }) => setUrl(data?.signedUrl ?? ''));
+      .then(({ data, error: signedUrlError }) => {
+        if (signedUrlError) {
+          if (!fallbackTried) {
+            void loadFallback();
+          } else {
+            setError(signedUrlError.message);
+          }
+          return;
+        }
+        if (!data?.signedUrl) {
+          if (!fallbackTried) {
+            void loadFallback();
+          } else {
+            setError('The photo URL could not be created.');
+          }
+          return;
+        }
+        void loadSignedImage(data.signedUrl);
+      });
   }, [path]);
   return url ? (
     <Image
       source={{ uri: url }}
       style={[styles.documentImage, gallery && styles.galleryImage]}
       resizeMode="cover"
+      onError={() => {
+        setUrl('');
+        if (!fallbackTried) {
+          void loadFallback();
+        } else {
+          setError('This image could not be loaded from storage.');
+        }
+      }}
     />
   ) : (
-    <Text style={styles.error}>Loading document...</Text>
+    <Text style={styles.error}>{error || 'Loading document...'}</Text>
   );
 }
 
@@ -1282,6 +2479,7 @@ function VehicleProfile({
   vehicle,
   visible,
   onClose,
+  onToggleArchive,
   canManage,
   userId,
   palette,
@@ -1289,22 +2487,28 @@ function VehicleProfile({
   vehicle: VehicleRecord | null;
   visible: boolean;
   onClose: () => void;
+  onToggleArchive: () => Promise<void>;
   canManage: boolean;
   userId: string;
   palette: { bg: string; card: string; text: string; muted: string };
 }) {
   const [mileage, setMileage] = useState<RecordRow[]>([]);
   const [maintenance, setMaintenance] = useState<RecordRow[]>([]);
+  const [maintenanceAttachments, setMaintenanceAttachments] = useState<RecordRow[]>([]);
   const [inspections, setInspections] = useState<RecordRow[]>([]);
   const [compliance, setCompliance] = useState<RecordRow[]>([]);
+  const [fuel, setFuel] = useState<RecordRow[]>([]);
   const [photos, setPhotos] = useState<RecordRow[]>([]);
   const [photoUri, setPhotoUri] = useState('');
+  const [photoPickerVisible, setPhotoPickerVisible] = useState(false);
+  const [photoBusy, setPhotoBusy] = useState(false);
   const [viewFile, setViewFile] = useState<string | null>(null);
   const [tab, setTab] = useState('overview');
+  const [profileSelectOpen, setProfileSelectOpen] = useState(false);
   useEffect(() => {
     if (!vehicle || !visible) return;
     const load = async () => {
-      const [m, s, i, c, p] = await Promise.all([
+      const [m, s, i, c, p, a, f] = await Promise.all([
         supabase
           .from('mileage_records')
           .select('*')
@@ -1330,25 +2534,49 @@ function VehicleProfile({
           .select('*')
           .eq('vehicle_id', vehicle.id)
           .eq('document_type', 'Vehicle Photo'),
+        supabase
+          .from('maintenance_attachments')
+          .select('id, maintenance_record_id, vehicle_id, attachment_type, file_path, created_at')
+          .eq('vehicle_id', vehicle.id)
+          .order('created_at', { ascending: false }),
+        supabase
+          .from('fuel_records')
+          .select(
+            'id, vehicle_id, refuel_date, fuel_type, litres, cost_per_litre, total_cost, odometer_reading, fuel_station, receipt_path, notes',
+          )
+          .eq('vehicle_id', vehicle.id)
+          .order('refuel_date', { ascending: false }),
       ]);
       setMileage((m.data ?? []) as RecordRow[]);
       setMaintenance((s.data ?? []) as RecordRow[]);
       setInspections((i.data ?? []) as RecordRow[]);
       setCompliance((c.data ?? []) as RecordRow[]);
-      setPhotos((p.data ?? []) as RecordRow[]);
+      const uniquePhotos = new Map<string, RecordRow>();
+      for (const photo of (p.data ?? []) as RecordRow[]) {
+        uniquePhotos.set(String(photo.file_path), photo);
+      }
+      setPhotos(Array.from(uniquePhotos.values()));
+      setMaintenanceAttachments((a.data ?? []) as RecordRow[]);
+      if (f.error) {
+        Alert.alert('Unable to load fuel history', f.error.message);
+        setFuel([]);
+      } else {
+        setFuel((f.data ?? []) as RecordRow[]);
+      }
     };
     void load();
   }, [vehicle, visible]);
   if (!vehicle) return null;
   const addPhoto = async () => {
-    if (!canManage || !photoUri) return;
+    if (!canManage || !photoUri || photoBusy) return;
+    setPhotoBusy(true);
     const filePath = `${vehicle.id}/${Date.now()}-${photoUri.split('/').pop() ?? 'photo'}`;
     try {
-      const response = await fetch(photoUri);
-      const blob = await response.blob();
+      const normalizedUri = await normalizeImage(photoUri);
+      const file = await new FileSystem.File(normalizedUri).bytes();
       const { error } = await supabase.storage
         .from('vehicle-documents')
-        .upload(filePath, blob, { upsert: false });
+        .upload(filePath, file, { upsert: false, contentType: 'image/jpeg' });
       if (error) throw error;
       const { data, error: insertError } = await supabase
         .from('vehicle_documents')
@@ -1361,12 +2589,51 @@ function VehicleProfile({
         .select()
         .single();
       if (insertError) throw insertError;
-      setPhotos((current) => [...current, data as RecordRow]);
+      setPhotos((current) => {
+        const nextPhoto = data as RecordRow;
+        if (current.some((photo) => photo.id === nextPhoto.id || photo.file_path === nextPhoto.file_path)) {
+          return current;
+        }
+        return [...current, nextPhoto];
+      });
       setPhotoUri('');
+      setPhotoPickerVisible(false);
       Alert.alert('Saved', 'Vehicle photo added.');
     } catch (e) {
       Alert.alert('Unable to upload photo', e instanceof Error ? e.message : 'Use a local file URI.');
+    } finally {
+      setPhotoBusy(false);
     }
+  };
+  const removePhoto = (photo: RecordRow) => {
+    Alert.alert('Remove vehicle photo?', 'This removes only the vehicle photo, not compliance evidence.', [
+      { text: 'Keep photo', style: 'cancel' },
+      {
+        text: 'Remove',
+        onPress: () => {
+          void (async () => {
+            try {
+              const filePath = String(photo.file_path);
+              const { error: storageError } = await supabase.storage
+                .from('vehicle-documents')
+                .remove([filePath]);
+              if (storageError) throw storageError;
+              const { error: recordError } = await supabase
+                .from('vehicle_documents')
+                .delete()
+                .eq('id', photo.id);
+              if (recordError) throw recordError;
+              setPhotos((current) => current.filter((item) => item.id !== photo.id));
+            } catch (error) {
+              Alert.alert(
+                'Unable to remove vehicle photo',
+                error instanceof Error ? error.message : 'Please try again.',
+              );
+            }
+          })();
+        },
+      },
+    ]);
   };
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
@@ -1378,9 +2645,6 @@ function VehicleProfile({
             </Text>
             <Text style={styles.vehicleDetailPlate}>{vehicle.registration_number}</Text>
           </View>
-          <Pressable onPress={onClose}>
-            <Text style={styles.close}>Close</Text>
-          </Pressable>
         </View>
         <ScrollView contentContainerStyle={styles.panel}>
           <View style={styles.vehicleDetailMeta}>
@@ -1389,55 +2653,88 @@ function VehicleProfile({
               {vehicle.vehicle_type} · {vehicle.status === 'active' ? 'Active' : 'Archived'}
             </Text>
           </View>
-          {photos.length ? (
-            <View style={styles.photoSection}>
-              <View style={styles.detailSectionHeader}>
-                <Text style={[styles.detailSectionTitle, { color: palette.text }]}>Vehicle photos</Text>
+          <View style={styles.photoSection}>
+            <View style={styles.detailSectionHeader}>
+              <Text style={[styles.detailSectionTitle, { color: palette.text }]}>Vehicle photos</Text>
+              <View style={styles.photoHeaderActions}>
                 <Text style={[styles.sectionHint, { color: palette.muted }]}>
                   {photos.length} {photos.length === 1 ? 'photo' : 'photos'}
                 </Text>
+                {canManage && (
+                  <Pressable onPress={() => setPhotoPickerVisible(true)}>
+                    <Text style={styles.addMoreLink}>Add</Text>
+                  </Pressable>
+                )}
               </View>
+            </View>
+            {photos.length ? (
               <ScrollView
-                horizontal={photos.length > 1}
-                showsHorizontalScrollIndicator={photos.length > 1}
+                horizontal
+                nestedScrollEnabled
+                showsHorizontalScrollIndicator
                 contentContainerStyle={styles.photoGallery}
               >
                 {photos.map((p) => (
-                  <SignedContent key={p.id} path={String(p.file_path)} gallery />
+                  <View key={p.id} style={styles.photoItem}>
+                    <SignedContent path={String(p.file_path)} gallery />
+                    {canManage && (
+                      <Pressable
+                        accessibilityLabel="Remove vehicle photo"
+                        style={styles.photoRemoveButton}
+                        onPress={() => removePhoto(p)}
+                      >
+                        <Text style={styles.photoRemoveIcon}>×</Text>
+                      </Pressable>
+                    )}
+                  </View>
                 ))}
               </ScrollView>
-            </View>
-          ) : (
-            <View style={[styles.emptyPhoto, { backgroundColor: palette.card }]}>
+            ) : (
+              <View style={[styles.emptyPhoto, { backgroundColor: palette.card }]}>
               <Text style={{ color: palette.muted }}>No photos added yet.</Text>
-            </View>
-          )}
-          {canManage && (
-            <View style={[styles.photoUploadCard, { backgroundColor: palette.card }]}>
-              <Text style={[styles.detailSectionTitle, { color: palette.text }]}>Add another photo</Text>
-              <Field
-                label="Local photo URI"
-                value={photoUri}
-                onChange={setPhotoUri}
-                palette={palette}
-              />
-              <Button title="Add photo" onPress={() => void addPhoto()} />
-            </View>
-          )}
-          <View style={styles.pickerWrap}>
-            {['overview', 'photos', 'mileage', 'inspections', 'maintenance', 'compliance'].map(
-              (v) => (
-                <Pressable
-                  key={v}
-                  onPress={() => setTab(v)}
-                  style={[
-                    styles.picker,
-                    { backgroundColor: tab === v ? colors.red : palette.card },
-                  ]}
-                >
-                  <Text style={{ color: tab === v ? '#fff' : palette.text }}>{v}</Text>
-                </Pressable>
-              ),
+              </View>
+            )}
+          </View>
+          <View style={styles.dropdownWrap}>
+            <Text style={[styles.fieldLabel, { color: palette.muted }]}>Vehicle records</Text>
+            <Pressable
+              style={[styles.dropdownButton, { backgroundColor: palette.card }]}
+              onPress={() => setProfileSelectOpen(!profileSelectOpen)}
+            >
+              <Text style={{ color: palette.text }}>
+                {{
+                  overview: 'Overview',
+                  mileage: 'Mileage history',
+                  inspections: 'Inspection history',
+                  maintenance: 'Maintenance history',
+                  fuel: 'Refuelling history',
+                  compliance: 'Compliance history',
+                }[tab as 'overview' | 'mileage' | 'inspections' | 'maintenance' | 'fuel' | 'compliance']}
+              </Text>
+              <Text style={{ color: palette.muted }}>{profileSelectOpen ? '⌃' : '⌄'}</Text>
+            </Pressable>
+            {profileSelectOpen && (
+              <View style={[styles.dropdownList, { backgroundColor: palette.card }]}>
+                {[
+                  ['overview', 'Overview'],
+                  ['mileage', 'Mileage history'],
+                  ['inspections', 'Inspection history'],
+                  ['maintenance', 'Maintenance history'],
+                  ['fuel', 'Refuelling history'],
+                  ['compliance', 'Compliance history'],
+                ].map(([value, label]) => (
+                  <Pressable
+                    key={value}
+                    style={styles.dropdownOption}
+                    onPress={() => {
+                      setTab(value);
+                      setProfileSelectOpen(false);
+                    }}
+                  >
+                    <Text style={{ color: palette.text }}>{label}</Text>
+                  </Pressable>
+                ))}
+              </View>
             )}
           </View>
           {tab === 'overview' && (
@@ -1446,26 +2743,51 @@ function VehicleProfile({
               <Text style={{ color: palette.text }}>Year: {vehicle.manufacturing_year}</Text>
               <Text style={{ color: palette.muted }}>Department: {vehicle.department ?? '—'}</Text>
               <Text style={{ color: palette.muted }}>Driver: {vehicle.assigned_driver ?? '—'}</Text>
-              <Text style={{ color: palette.muted }}>Fuel: {vehicle.fuel_type ?? '—'}</Text>
-              <Text style={[styles.detailSectionTitle, { color: palette.text }]}>Mileage records</Text>
-              <Rows rows={mileage} palette={palette} />
-              <Text style={[styles.detailSectionTitle, { color: palette.text }]}>Inspection records</Text>
-              <Rows rows={inspections} palette={palette} />
+              <Text style={{ color: palette.muted }}>
+                Energy: {vehicle.energy_type === 'electric' ? 'Electric' : 'Fuel'} · Fuel:{' '}
+                {vehicle.fuel_type ?? '—'}
+              </Text>
+              <Text style={[styles.detailSectionTitle, { color: palette.text }]}>Latest mileage</Text>
+              <MileageRows rows={mileage.slice(0, 1)} palette={palette} />
+              <Text style={[styles.detailSectionTitle, { color: palette.text }]}>Latest inspection</Text>
+              <InspectionRows rows={inspections.slice(0, 1)} palette={palette} />
+              <Text style={[styles.detailSectionTitle, { color: palette.text }]}>Latest maintenance</Text>
+              <MaintenanceRows
+                rows={maintenance.slice(0, 1)}
+                attachments={maintenanceAttachments}
+                palette={palette}
+                onViewFile={setViewFile}
+              />
+              <Text style={[styles.detailSectionTitle, { color: palette.text }]}>Latest refuelling</Text>
+              {vehicle.energy_type === 'fuel' ? (
+                <FuelRows rows={fuel.slice(0, 1)} palette={palette} onViewFile={setViewFile} />
+              ) : (
+                <Text style={{ color: palette.muted }}>Not applicable to electric vehicles.</Text>
+              )}
+              <Text style={[styles.detailSectionTitle, { color: palette.text }]}>Latest compliance</Text>
+              <ComplianceRows rows={compliance.slice(0, 1)} palette={palette} onViewFile={setViewFile} />
             </View>
           )}
-          {tab === 'photos' && <Text style={{ color: palette.muted }}>Photos are shown above.</Text>}
-          {tab === 'mileage' && <Rows rows={mileage} palette={palette} />}
-          {tab === 'inspections' && <Rows rows={inspections} palette={palette} />}
+          {tab === 'mileage' && <MileageRows rows={mileage} palette={palette} />}
+          {tab === 'inspections' && <InspectionRows rows={inspections} palette={palette} />}
           {tab === 'maintenance' && (
-            <Rows
+            <MaintenanceRows
               rows={maintenance}
+              attachments={maintenanceAttachments}
               palette={palette}
-              fileKey="document_path"
               onViewFile={setViewFile}
             />
           )}
+          {tab === 'fuel' && <FuelRows rows={fuel} palette={palette} onViewFile={setViewFile} />}
           {tab === 'compliance' && (
-            <Rows rows={compliance} palette={palette} fileKey="file_path" onViewFile={setViewFile} />
+            <ComplianceRows rows={compliance} palette={palette} onViewFile={setViewFile} />
+          )}
+          {canManage && (
+            <Button
+              title={vehicle.status === 'active' ? 'Archive vehicle' : 'Restore vehicle'}
+              variant={vehicle.status === 'active' ? 'archive' : 'success'}
+              onPress={() => void onToggleArchive()}
+            />
           )}
         </ScrollView>
         <Modal
@@ -1478,7 +2800,35 @@ function VehicleProfile({
             <View style={[styles.viewer, { backgroundColor: palette.card }]}>
               <Heading palette={palette}>Vehicle record attachment</Heading>
               {viewFile ? <SignedContent path={viewFile} /> : null}
-              <Button title="Close" onPress={() => setViewFile(null)} />
+            </View>
+          </View>
+        </Modal>
+        <Modal
+          visible={photoPickerVisible}
+          animationType="slide"
+          onRequestClose={() => setPhotoPickerVisible(false)}
+        >
+          <View style={[styles.modalPage, { backgroundColor: palette.bg }]}>
+            <View style={styles.modalHeader}>
+              <Text style={[styles.modalTitle, { color: palette.text }]}>Add vehicle photo</Text>
+            </View>
+            <View style={styles.panel}>
+              <Pressable
+                style={[styles.attachmentBox, { borderColor: colors.border }]}
+                onPress={() => void choosePhoto().then((uri) => uri && setPhotoUri(uri))}
+              >
+                {photoUri ? (
+                  <Image source={{ uri: photoUri }} style={styles.attachmentPreview} />
+                ) : (
+                  <Text style={styles.attachmentPlaceholder}>Upload vehicle photo</Text>
+                )}
+              </Pressable>
+              <Button
+                title="Save vehicle photo"
+                variant="secondary"
+                disabled={!photoUri || photoBusy}
+                onPress={() => void addPhoto()}
+              />
             </View>
           </View>
         </Modal>
@@ -1511,7 +2861,11 @@ function Rows({
               </Text>
             ))}
           {fileKey && r[fileKey] && onViewFile ? (
-            <Button title="View attachment" onPress={() => onViewFile(String(r[fileKey]))} />
+            <Button
+              title="View attachment"
+              variant="secondary"
+              onPress={() => onViewFile(String(r[fileKey]))}
+            />
           ) : null}
         </View>
       ))}
@@ -1520,69 +2874,604 @@ function Rows({
     <Text style={{ color: palette.muted }}>No records yet.</Text>
   );
 }
+
+function MileageRows({
+  rows,
+  palette,
+}: {
+  rows: RecordRow[];
+  palette: { card: string; text: string; muted: string };
+}) {
+  return rows.length ? (
+    <ScrollView horizontal showsHorizontalScrollIndicator>
+      <View style={[styles.tableCard, { backgroundColor: palette.card }]}>
+        <View style={styles.tableRow}>
+          <Text style={[styles.tableHeaderCell, styles.tableDateCell, { color: palette.text }]}>Date</Text>
+          <Text style={[styles.tableHeaderCell, styles.tableValueCell, { color: palette.text }]}>Mileage</Text>
+          <Text style={[styles.tableHeaderCell, styles.tableRemarksCell, { color: palette.text }]}>Remarks</Text>
+        </View>
+        {rows.map((row) => (
+          <View key={row.id} style={styles.tableRow}>
+            <Text style={[styles.tableCell, styles.tableDateCell, { color: palette.muted }]}>
+              {String(row.reading_date)}
+            </Text>
+            <Text style={[styles.tableCell, styles.tableValueCell, { color: palette.muted }]}>
+              {String(row.odometer_reading)} km
+            </Text>
+            <Text style={[styles.tableCell, styles.tableRemarksCell, { color: palette.muted }]}>
+              {String(row.notes ?? '—')}
+            </Text>
+          </View>
+        ))}
+      </View>
+    </ScrollView>
+  ) : (
+    <Text style={{ color: palette.muted }}>No mileage records yet.</Text>
+  );
+}
+
+function InspectionRows({
+  rows,
+  palette,
+}: {
+  rows: RecordRow[];
+  palette: { card: string; text: string; muted: string };
+}) {
+  return rows.length ? (
+    <ScrollView horizontal showsHorizontalScrollIndicator>
+      <View style={[styles.tableCard, { backgroundColor: palette.card }]}>
+        <View style={styles.tableRow}>
+          <Text style={[styles.tableHeaderCell, styles.tableDateCell, { color: palette.text }]}>Date</Text>
+          <Text style={[styles.tableHeaderCell, styles.tableValueCell, { color: palette.text }]}>Odometer</Text>
+          <Text style={[styles.tableHeaderCell, styles.tableConditionCell, { color: palette.text }]}>Condition</Text>
+          <Text style={[styles.tableHeaderCell, styles.tableRemarksCell, { color: palette.text }]}>Remarks</Text>
+        </View>
+        {rows.map((row) => (
+          <View key={row.id} style={styles.tableRow}>
+            <Text style={[styles.tableCell, styles.tableDateCell, { color: palette.muted }]}>
+              {String(row.inspection_date)}
+            </Text>
+            <Text style={[styles.tableCell, styles.tableValueCell, { color: palette.muted }]}>
+              {String(row.odometer_reading)} km
+            </Text>
+            <Text style={[styles.tableCell, styles.tableConditionCell, { color: palette.muted }]}>
+              {String(row.overall_condition ?? '—')}
+            </Text>
+            <Text style={[styles.tableCell, styles.tableRemarksCell, { color: palette.muted }]}>
+              {String(row.remarks ?? '—')}
+            </Text>
+          </View>
+        ))}
+      </View>
+    </ScrollView>
+  ) : (
+    <Text style={{ color: palette.muted }}>No inspection records yet.</Text>
+  );
+}
+
+function FuelRows({
+  rows,
+  palette,
+  onViewFile,
+}: {
+  rows: RecordRow[];
+  palette: { card: string; text: string; muted: string };
+  onViewFile: (path: string) => void;
+}) {
+  return rows.length ? (
+    <>
+      {rows.map((row) => (
+        <View key={row.id} style={[styles.card, { backgroundColor: palette.card }]}>
+          <Text style={{ color: palette.text }}>
+            {String(row.refuel_date)} · {String(row.fuel_type)}
+          </Text>
+          <Text style={{ color: palette.muted }}>
+            Quantity: {String(row.litres)} L · Cost/L: LKR {String(row.cost_per_litre)} · Total: LKR{' '}
+            {String(row.total_cost)}
+          </Text>
+          <Text style={{ color: palette.muted }}>
+            Odometer: {row.odometer_reading == null ? '—' : `${String(row.odometer_reading)} km`}
+          </Text>
+          <Text style={{ color: palette.muted }}>
+            Station: {String(row.fuel_station ?? '—')}
+          </Text>
+          {row.notes ? <Text style={{ color: palette.muted }}>Notes: {String(row.notes)}</Text> : null}
+          {row.receipt_path ? (
+            <Button
+              title="View fuel receipt"
+              variant="secondary"
+              onPress={() => onViewFile(String(row.receipt_path))}
+            />
+          ) : (
+            <Text style={{ color: palette.muted }}>No receipt attached.</Text>
+          )}
+        </View>
+      ))}
+    </>
+  ) : (
+    <Text style={{ color: palette.muted }}>No fuel records yet.</Text>
+  );
+}
+
+function ComplianceRows({
+  rows,
+  palette,
+  onViewFile,
+}: {
+  rows: RecordRow[];
+  palette: { card: string; text: string; muted: string };
+  onViewFile: (path: string) => void;
+}) {
+  return rows.length ? (
+    <ScrollView horizontal showsHorizontalScrollIndicator>
+      <View style={[styles.tableCard, styles.complianceTableCard, { backgroundColor: palette.card }]}>
+        <View style={styles.tableRow}>
+          {[
+            { label: 'Certificate', style: styles.tableComplianceTypeCell },
+            { label: 'From', style: styles.tableDateCell },
+            { label: 'To', style: styles.tableDateCell },
+            { label: 'Reference', style: styles.tableComplianceReferenceCell },
+            { label: 'Status', style: styles.tableComplianceStatusCell },
+          ].map(({ label, style }) => (
+            <Text key={label} style={[styles.tableHeaderCell, style, { color: palette.text }]}>
+              {label}
+            </Text>
+          ))}
+        </View>
+        {rows.map((row) => (
+          <View key={row.id} style={styles.tableRow}>
+            <Text style={[styles.tableCell, styles.tableComplianceTypeCell, { color: palette.muted }]}>
+              {String(row.compliance_type)}
+            </Text>
+            <Text style={[styles.tableCell, styles.tableDateCell, { color: palette.muted }]}>
+              {String(row.issue_date ?? '—')}
+            </Text>
+            <Text style={[styles.tableCell, styles.tableDateCell, { color: palette.muted }]}>
+              {String(row.expiry_date ?? '—')}
+            </Text>
+            <Text style={[styles.tableCell, styles.tableComplianceReferenceCell, { color: palette.muted }]}>
+              {String(row.reference_number ?? '—')}
+            </Text>
+            <View style={styles.tableComplianceStatusCell}>
+              <Text style={[styles.tableCell, { color: palette.muted }]}>{String(row.status)}</Text>
+              {row.file_path ? (
+                <Pressable onPress={() => onViewFile(String(row.file_path))}>
+                  <Text style={styles.addMoreLink}>View</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          </View>
+        ))}
+      </View>
+    </ScrollView>
+  ) : (
+    <Text style={{ color: palette.muted }}>No compliance records yet.</Text>
+  );
+}
+
+function MaintenanceRows({
+  rows,
+  attachments,
+  palette,
+  onViewFile,
+}: {
+  rows: RecordRow[];
+  attachments: RecordRow[];
+  palette: { card: string; text: string; muted: string };
+  onViewFile: (path: string) => void;
+}) {
+  return rows.length ? (
+    <>
+      {rows.map((row) => {
+        const rowAttachments = attachments.filter(
+          (attachment) => attachment.maintenance_record_id === row.id,
+        );
+        return (
+          <View key={row.id} style={[styles.card, { backgroundColor: palette.card }]}>
+            <Text style={{ color: palette.text }}>
+              {String(row.service_date)} · {String(row.service_type)}
+            </Text>
+            <Text style={{ color: palette.muted }}>
+              Sent: {String(row.handover_date ?? '—')} · Returned:{' '}
+              {String(row.retrieval_date ?? 'Pending')}
+            </Text>
+            <Text style={{ color: palette.muted }}>
+              {String(row.service_station ?? 'No station')} · {String(row.description ?? 'No repair description')}
+            </Text>
+            <Text style={{ color: palette.muted }}>
+              Odometer: {row.odometer_reading == null ? '—' : `${String(row.odometer_reading)} km`} ·
+              Cost: LKR {String(row.cost ?? '0.00')}
+            </Text>
+            {rowAttachments.length ? (
+              rowAttachments.map((attachment) => (
+                <Button
+                  key={attachment.id}
+                  title={
+                    attachment.attachment_type
+                      ? `View ${String(attachment.attachment_type).toLowerCase()}`
+                      : 'View attachment'
+                  }
+                  variant="secondary"
+                  onPress={() => onViewFile(String(attachment.file_path))}
+                />
+              ))
+            ) : (
+              <Text style={{ color: palette.muted }}>No invoice or receipt attached.</Text>
+            )}
+          </View>
+        );
+      })}
+    </>
+  ) : (
+    <Text style={{ color: palette.muted }}>No records yet.</Text>
+  );
+}
+type ReportKind = 'compliance' | 'maintenance' | 'fuel';
+type ReportValue = string | number | null;
+type ReportRow = Record<string, ReportValue>;
+type ReportColumn = { key: string; label: string };
+
+function csvValue(value: ReportValue) {
+  return `"${String(value ?? '').replaceAll('"', '""')}"`;
+}
+
+function reportHtml(title: string, columns: ReportColumn[], rows: ReportRow[]) {
+  const headers = columns.map((column) => `<th>${column.label}</th>`).join('');
+  const body = rows
+    .map(
+      (row) =>
+        `<tr>${columns.map((column) => `<td>${String(row[column.key] ?? '—')}</td>`).join('')}</tr>`,
+    )
+    .join('');
+  return `<html><head><meta name="viewport" content="width=device-width, initial-scale=1" /><style>
+    body { font-family: Arial, sans-serif; color: #102a43; padding: 18px; }
+    h1 { font-size: 20px; } table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #d9e2ec; padding: 8px; text-align: left; font-size: 11px; }
+    th { background: #e8eef7; font-weight: bold; }
+  </style></head><body><h1>${title}</h1><table><thead><tr>${headers}</tr></thead><tbody>${body}</tbody></table></body></html>`;
+}
+
 function Reports({
   vehicles,
   palette,
 }: {
   vehicles: VehicleRecord[];
-  palette: { card: string; text: string; muted: string };
+  palette: { bg: string; card: string; text: string; muted: string };
 }) {
+  const [kind, setKind] = useState<ReportKind>('compliance');
+  const [kindOpen, setKindOpen] = useState(false);
   const [vehicleId, setVehicleId] = useState('');
-  const [report, setReport] = useState('');
+  const [vehicleOpen, setVehicleOpen] = useState(false);
+  const [startDate, setStartDate] = useState(formatDate(new Date(Date.now() - 30 * 86400000)));
+  const [endDate, setEndDate] = useState(formatDate(new Date()));
+  const [columns, setColumns] = useState<ReportColumn[]>([]);
+  const [rows, setRows] = useState<ReportRow[]>([]);
+  const [busy, setBusy] = useState(false);
+  const selectedVehicle = vehicles.find((vehicle) => vehicle.id === vehicleId);
+  const reportTitle =
+    kind === 'compliance'
+      ? 'Latest compliance certificates by vehicle'
+      : kind === 'maintenance'
+        ? `Maintenance history${selectedVehicle ? ` · ${selectedVehicle.registration_number}` : ''}`
+        : 'Refuelling statistics by vehicle and period';
+
   const generate = async () => {
-    const v = vehicles.find((x) => x.id === vehicleId);
-    if (!v) return;
-    const [m, s, i, c] = await Promise.all([
-      supabase
-        .from('mileage_records')
-        .select('reading_date, odometer_reading, notes')
-        .eq('vehicle_id', v.id),
-      supabase
-        .from('maintenance_records')
-        .select('service_date, service_type, description, service_station, provider, cost')
-        .eq('vehicle_id', v.id),
-      supabase
-        .from('inspections')
-        .select('inspection_date, overall_condition, remarks')
-        .eq('vehicle_id', v.id),
-      supabase
-        .from('compliance_records')
-        .select('compliance_type, issue_date, expiry_date, status, reference_number')
-        .eq('vehicle_id', v.id),
-    ]);
-    setReport(
-      [
-        `Vehicle details\\nRegistration,${v.registration_number}\\nMake,${v.make}\\nModel,${v.model}\\nYear,${v.manufacturing_year}`,
-        `Mileage history\\n${(m.data ?? []).map((r) => `${r.reading_date},${r.odometer_reading},${r.notes ?? ''}`).join('\\n')}`,
-        `Service history\\n${(s.data ?? []).map((r) => `${r.service_date},${r.service_type},${r.service_station ?? ''},${r.provider ?? ''},${r.cost ?? ''}`).join('\\n')}`,
-        `Inspection history\\n${(i.data ?? []).map((r) => `${r.inspection_date},${r.overall_condition},${r.remarks ?? ''}`).join('\\n')}`,
-        `Compliance history\\n${(c.data ?? []).map((r) => `${r.compliance_type},${r.issue_date ?? ''},${r.expiry_date ?? ''},${r.status}`).join('\\n')}`,
-      ].join('\\n\\n'),
-    );
+    if (startDate > endDate) {
+      Alert.alert('Invalid date range', 'The start date cannot be after the end date.');
+      return;
+    }
+    if (kind === 'maintenance' && !vehicleId) {
+      Alert.alert('Vehicle required', 'Select a vehicle for the maintenance history report.');
+      return;
+    }
+    setBusy(true);
+    try {
+      if (kind === 'compliance') {
+        const { data, error } = await supabase
+          .from('compliance_records')
+          .select('vehicle_id, compliance_type, issue_date, expiry_date, reference_number, status, updated_at, created_at')
+          .order('updated_at', { ascending: false });
+        if (error) throw error;
+        const latest = new Map<string, Record<string, unknown>>();
+        const orderedCompliance = [...(data ?? [])].sort((a, b) =>
+          String(b.updated_at ?? b.created_at ?? '').localeCompare(
+            String(a.updated_at ?? a.created_at ?? ''),
+          ),
+        );
+        for (const record of orderedCompliance) {
+          const key = `${record.vehicle_id}:${record.compliance_type}`;
+          if (!latest.has(key)) latest.set(key, record);
+        }
+        const reportRows = vehicles.flatMap((vehicle) => {
+          const byType = (type: string) => latest.get(`${vehicle.id}:${type}`);
+          const revenue = byType('Revenue Licence');
+          const emission = byType('Emission Test');
+          const insurance = byType('Insurance');
+          return [
+            {
+              registration: vehicle.registration_number,
+              vehicle: `${vehicle.make} ${vehicle.model}`,
+              revenue_duration: revenue
+                ? `${String(revenue.issue_date ?? '—')} - ${String(revenue.expiry_date ?? '—')}`
+                : '—',
+              emission_duration: emission
+                ? `${String(emission.issue_date ?? '—')} - ${String(emission.expiry_date ?? '—')}`
+                : '—',
+              insurance_duration: insurance
+                ? `${String(insurance.issue_date ?? '—')} - ${String(insurance.expiry_date ?? '—')}`
+                : '—',
+            },
+          ];
+        });
+        setColumns([
+          { key: 'registration', label: 'Registration' },
+          { key: 'vehicle', label: 'Vehicle' },
+          { key: 'revenue_duration', label: 'Revenue licence duration' },
+          { key: 'emission_duration', label: 'Emission test duration' },
+          { key: 'insurance_duration', label: 'Insurance duration' },
+        ]);
+        setRows(reportRows);
+      } else if (kind === 'maintenance') {
+        const { data, error } = await supabase
+          .from('maintenance_records')
+          .select('service_date, handover_date, retrieval_date, odometer_reading, service_type, description, service_station, cost')
+          .eq('vehicle_id', vehicleId)
+          .order('service_date', { ascending: false });
+        if (error) throw error;
+        setColumns([
+          { key: 'service_date', label: 'Service date' },
+          { key: 'handover_date', label: 'Sent to service' },
+          { key: 'retrieval_date', label: 'Returned from service' },
+          { key: 'odometer', label: 'Odometer (km)' },
+          { key: 'service_type', label: 'Service type' },
+          { key: 'description', label: 'Repair description' },
+          { key: 'station', label: 'Service station' },
+          { key: 'cost', label: 'Cost (LKR)' },
+        ]);
+        setRows(
+          (data ?? []).map((record) => ({
+            service_date: record.service_date,
+            handover_date: record.handover_date,
+            retrieval_date: record.retrieval_date,
+            odometer: record.odometer_reading,
+            service_type: record.service_type,
+            description: record.description,
+            station: record.service_station,
+            cost: record.cost,
+          })),
+        );
+      } else {
+        const { data, error } = await supabase
+          .from('fuel_records')
+          .select('vehicle_id, refuel_date, fuel_type, litres, cost_per_litre, total_cost')
+          .gte('refuel_date', startDate)
+          .lte('refuel_date', endDate);
+        if (error) throw error;
+        const stats = new Map<string, { events: number; litres: number; cost: number }>();
+        for (const record of data ?? []) {
+          const current = stats.get(record.vehicle_id) ?? { events: 0, litres: 0, cost: 0 };
+          current.events += 1;
+          current.litres += Number(record.litres ?? 0);
+          current.cost += Number(record.total_cost ?? 0);
+          stats.set(record.vehicle_id, current);
+        }
+        setColumns([
+          { key: 'registration', label: 'Registration' },
+          { key: 'vehicle', label: 'Vehicle' },
+          { key: 'events', label: 'Refuelling events' },
+          { key: 'litres', label: 'Total litres' },
+          { key: 'cost', label: 'Total cost (LKR)' },
+          { key: 'average', label: 'Average cost/L (LKR)' },
+        ]);
+        setRows(
+          vehicles.map((vehicle) => {
+            const stat = stats.get(vehicle.id) ?? { events: 0, litres: 0, cost: 0 };
+            return {
+              registration: vehicle.registration_number,
+              vehicle: `${vehicle.make} ${vehicle.model}`,
+              events: stat.events,
+              litres: stat.litres.toFixed(3),
+              cost: stat.cost.toFixed(2),
+              average: stat.litres ? (stat.cost / stat.litres).toFixed(2) : '—',
+            };
+          }),
+        );
+      }
+    } catch (error) {
+      Alert.alert('Unable to generate report', error instanceof Error ? error.message : 'Please try again.');
+    } finally {
+      setBusy(false);
+    }
   };
+
+  const exportCsv = async () => {
+    if (!rows.length) return;
+    const csv = [
+      columns.map((column) => csvValue(column.label)).join(','),
+      ...rows.map((row) => columns.map((column) => csvValue(row[column.key])).join(',')),
+    ].join('\n');
+    try {
+      const file = new FileSystem.File(
+        FileSystem.Paths.document,
+        `riyon-${kind}-report-${Date.now()}.csv`,
+      );
+      await file.write(csv);
+      if (!(await Sharing.isAvailableAsync())) {
+        Alert.alert('CSV ready', `The CSV file was created at ${file.uri}.`);
+        return;
+      }
+      await Sharing.shareAsync(file.uri, { mimeType: 'text/csv', dialogTitle: 'Export CSV report' });
+    } catch (error) {
+      Alert.alert('Unable to export CSV', error instanceof Error ? error.message : 'Please try again.');
+    }
+  };
+
+  const exportPdf = async () => {
+    if (!rows.length) return;
+    try {
+      const { base64 } = await Print.printToFileAsync({
+        html: reportHtml(reportTitle, columns, rows),
+        base64: true,
+      });
+      if (!base64 || !LegacyFileSystem.documentDirectory) {
+        throw new Error('The PDF could not be saved to app storage.');
+      }
+      const fileUri = `${LegacyFileSystem.documentDirectory}riyon-${kind}-report-${Date.now()}.pdf`;
+      await LegacyFileSystem.writeAsStringAsync(fileUri, base64, {
+        encoding: LegacyFileSystem.EncodingType.Base64,
+      });
+      if (!(await Sharing.isAvailableAsync())) {
+        Alert.alert('PDF ready', `The PDF file was created at ${fileUri}.`);
+        return;
+      }
+      try {
+        await Sharing.shareAsync(fileUri, {
+          mimeType: 'application/pdf',
+          dialogTitle: 'Export PDF report',
+        });
+      } catch (shareError) {
+        if (Platform.OS !== 'android') throw shareError;
+        const contentUri = await LegacyFileSystem.getContentUriAsync(fileUri);
+        await Sharing.shareAsync(contentUri, {
+          mimeType: 'application/pdf',
+          dialogTitle: 'Export PDF report',
+        });
+      }
+    } catch (error) {
+      Alert.alert('Unable to export PDF', error instanceof Error ? error.message : 'Please try again.');
+    }
+  };
+
   return (
     <Panel>
-      <Heading palette={palette}>Structured vehicle report</Heading>
+      <Heading palette={palette}>Fleet reports</Heading>
       <Text style={{ color: palette.muted }}>
-        Select one vehicle to generate a sectioned report. Copy/export can be added when a sharing
-        module is installed.
+        Choose a report, set the period where applicable, preview the indexed table, and export it.
       </Text>
-      <VehiclePicker
-        vehicles={vehicles}
-        value={vehicleId}
-        onChange={setVehicleId}
-        palette={palette}
-      />
-      <Button title="Generate report" onPress={() => void generate()} />
-      {report ? (
-        <Text
-          selectable
-          style={[styles.report, { color: palette.text, backgroundColor: palette.card }]}
+      <View style={styles.dropdownWrap}>
+        <Text style={[styles.fieldLabel, { color: palette.muted }]}>Report type</Text>
+        <Pressable
+          style={[styles.dropdownButton, { backgroundColor: palette.card }]}
+          onPress={() => setKindOpen(!kindOpen)}
         >
-          {report}
-        </Text>
+          <Text style={{ color: palette.text }}>{reportTitle}</Text>
+          <Text style={{ color: palette.muted }}>{kindOpen ? '⌃' : '⌄'}</Text>
+        </Pressable>
+        {kindOpen && (
+          <View style={[styles.dropdownList, { backgroundColor: palette.card }]}>
+            {[
+              ['compliance', 'Latest compliance summary'],
+              ['maintenance', 'Maintenance history per vehicle'],
+              ['fuel', 'Refuelling statistics for all vehicles'],
+            ].map(([value, label]) => (
+              <Pressable
+                key={value}
+                style={styles.dropdownOption}
+                onPress={() => {
+                  setKind(value as ReportKind);
+                  setKindOpen(false);
+                  setRows([]);
+                }}
+              >
+                <Text style={{ color: palette.text }}>{label}</Text>
+              </Pressable>
+            ))}
+          </View>
+        )}
+      </View>
+      {kind === 'maintenance' && (
+        <View style={styles.dropdownWrap}>
+          <Text style={[styles.fieldLabel, { color: palette.muted }]}>Vehicle</Text>
+          <Pressable
+            style={[styles.dropdownButton, { backgroundColor: palette.card }]}
+            onPress={() => setVehicleOpen(!vehicleOpen)}
+          >
+            <Text style={{ color: selectedVehicle ? palette.text : palette.muted }}>
+              {selectedVehicle
+                ? `${selectedVehicle.make} ${selectedVehicle.model} · ${selectedVehicle.registration_number}`
+                : 'Select a vehicle'}
+            </Text>
+            <Text style={{ color: palette.muted }}>{vehicleOpen ? '⌃' : '⌄'}</Text>
+          </Pressable>
+          {vehicleOpen && (
+            <View style={[styles.dropdownList, { backgroundColor: palette.card }]}>
+              {vehicles.map((vehicle) => (
+                <Pressable
+                  key={vehicle.id}
+                  style={styles.dropdownOption}
+                  onPress={() => {
+                    setVehicleId(vehicle.id);
+                    setVehicleOpen(false);
+                  }}
+                >
+                  <Text style={{ color: palette.text }}>
+                    {vehicle.registration_number} · {vehicle.make} {vehicle.model}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          )}
+        </View>
+      )}
+      {kind === 'fuel' && (
+        <View style={styles.reportDateRow}>
+          <View style={styles.reportDateField}>
+            <DatePickerField label="From" value={startDate} onChange={setStartDate} palette={palette} />
+          </View>
+          <View style={styles.reportDateField}>
+            <DatePickerField label="To" value={endDate} onChange={setEndDate} palette={palette} />
+          </View>
+        </View>
+      )}
+      <Button
+        title={busy ? 'Generating...' : 'Generate report'}
+        variant="success"
+        disabled={busy}
+        onPress={() => void generate()}
+      />
+      {rows.length ? (
+        <>
+          <ReportTable columns={columns} rows={rows} palette={palette} />
+          <View style={styles.recordActions}>
+            <Button title="Export CSV" variant="secondary" onPress={() => void exportCsv()} />
+            <Button title="Export PDF" variant="success" onPress={() => void exportPdf()} />
+          </View>
+        </>
       ) : null}
     </Panel>
+  );
+}
+
+function ReportTable({
+  columns,
+  rows,
+  palette,
+}: {
+  columns: ReportColumn[];
+  rows: ReportRow[];
+  palette: { card: string; text: string; muted: string };
+}) {
+  return (
+    <ScrollView horizontal showsHorizontalScrollIndicator>
+      <View style={[styles.tableCard, styles.reportTableCard, { backgroundColor: palette.card }]}>
+        <View style={styles.tableRow}>
+          {columns.map((column) => (
+            <Text key={column.key} style={[styles.reportTableHeader, { color: palette.text }]}>
+              {column.label}
+            </Text>
+          ))}
+        </View>
+        {rows.map((row, index) => (
+          <View key={String(row.registration ?? row.service_date ?? index)} style={styles.tableRow}>
+            {columns.map((column) => (
+              <Text key={column.key} style={[styles.reportTableCell, { color: palette.muted }]}>
+                {String(row[column.key] ?? '—')}
+              </Text>
+            ))}
+          </View>
+        ))}
+      </View>
+    </ScrollView>
   );
 }
 
@@ -1753,7 +3642,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 9,
   },
-  listToggleActive: { backgroundColor: colors.navy },
+  listToggleActive: { backgroundColor: '#9aa5b1' },
   card: { borderRadius: 12, gap: 5, padding: 14 },
   cardTitle: { fontSize: 17, fontWeight: '800' },
   vehicleListHeader: { alignItems: 'center', flexDirection: 'row', gap: 12 },
@@ -1772,6 +3661,15 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
   },
   vehicleActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 10 },
+  fleetHeader: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' },
+  filterRow: { flexDirection: 'row', gap: 8 },
+  filterField: { flex: 1 },
+  vehicleCardTitleRow: { alignItems: 'center', flexDirection: 'row', gap: 8 },
+  vehicleStatus: { borderRadius: 12, fontSize: 11, fontWeight: '800', overflow: 'hidden', paddingHorizontal: 8, paddingVertical: 4 },
+  vehicleStatusAttention: { backgroundColor: '#fde2e1', color: colors.red },
+  vehicleStatusDue: { backgroundColor: '#fff0d4', color: '#8a5a00' },
+  vehicleStatusActive: { backgroundColor: '#d9f7e7', color: '#16875a' },
+  vehicleDueRow: { borderTopColor: colors.border, borderTopWidth: 1, marginTop: 12, paddingTop: 11 },
   vehicleDetailTitle: { fontSize: 20, fontWeight: '900' },
   vehicleDetailPlate: {
     backgroundColor: '#fff2cc',
@@ -1792,14 +3690,39 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: 8,
   },
+  photoHeaderActions: { alignItems: 'center', flexDirection: 'row', gap: 12 },
+  addMoreLink: { color: '#2870d8', fontSize: 13, fontWeight: '800' },
   detailSectionTitle: { fontSize: 16, fontWeight: '800' },
   photoSection: { gap: 4 },
   photoGallery: { gap: 10 },
+  photoItem: { position: 'relative', width: 280 },
+  photoRemoveButton: {
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    elevation: 3,
+    height: 24,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 7,
+    top: 7,
+    width: 24,
+  },
+  photoRemoveIcon: { color: colors.red, fontSize: 22, fontWeight: '800', lineHeight: 22 },
   emptyPhoto: { alignItems: 'center', borderRadius: 12, padding: 28 },
   photoUploadCard: { borderRadius: 12, gap: 8, padding: 12 },
   detailCard: { borderRadius: 12, gap: 8, padding: 14 },
   operationsIntro: { gap: 4 },
   fieldLabel: { fontSize: 12, fontWeight: '700', marginBottom: 5 },
+  dateButton: {
+    alignItems: 'center',
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+    padding: 11,
+  },
   dropdownWrap: { position: 'relative', zIndex: 2 },
   dropdownButton: {
     alignItems: 'center',
@@ -1845,6 +3768,28 @@ const styles = StyleSheet.create({
   updateChoiceIcon: { fontSize: 22, marginBottom: 4 },
   updateChoiceTitle: { fontSize: 14, fontWeight: '900' },
   updateForm: { borderRadius: 13, gap: 10, padding: 14, zIndex: 1 },
+  attachmentBox: {
+    borderRadius: 12,
+    borderStyle: 'dashed',
+    borderWidth: 1,
+    height: 118,
+    overflow: 'hidden',
+    padding: 8,
+  },
+  attachmentPicker: { alignItems: 'center', flex: 1, justifyContent: 'center' },
+  attachmentGallery: { gap: 8 },
+  attachmentThumbnail: { borderRadius: 8, height: 92, width: 92 },
+  attachmentPreview: { borderRadius: 10, height: 102, width: '100%' },
+  attachmentAddTile: {
+    alignItems: 'center',
+    backgroundColor: '#eef3fa',
+    borderRadius: 8,
+    height: 92,
+    justifyContent: 'center',
+    width: 92,
+  },
+  attachmentAddText: { color: colors.navy, fontSize: 32, fontWeight: '300' },
+  attachmentPlaceholder: { color: colors.muted, fontSize: 14, fontWeight: '700' },
   historyHeader: {
     alignItems: 'baseline',
     flexDirection: 'row',
@@ -1852,10 +3797,45 @@ const styles = StyleSheet.create({
     marginTop: 7,
   },
   historyCard: { borderLeftColor: colors.red, borderLeftWidth: 4, borderRadius: 10, gap: 4, padding: 12 },
+  historyRecordCard: { borderRadius: 12, gap: 8, padding: 15 },
+  historyRecordTitle: { fontSize: 17, fontWeight: '800' },
+  recordActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   historyValue: { fontSize: 16, fontWeight: '900' },
+  totalCostBox: { borderRadius: 10, flexDirection: 'row', justifyContent: 'space-between', padding: 12 },
+  fuelHistorySection: { gap: 8 },
+  tableCard: { borderRadius: 12, minWidth: 520, overflow: 'hidden', padding: 10 },
+  fuelTableCard: { minWidth: 830 },
+  complianceTableCard: { minWidth: 680 },
+  tableRow: {
+    borderBottomColor: colors.border,
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    gap: 8,
+    paddingVertical: 11,
+  },
+  tableHeaderCell: { fontSize: 12, fontWeight: '900' },
+  tableCell: { fontSize: 13 },
+  tableDateCell: { width: 105 },
+  tableValueCell: { width: 105 },
+  tableConditionCell: { width: 115 },
+  tableRemarksCell: { flex: 1, minWidth: 150 },
+  tableFuelTypeCell: { width: 100 },
+  tableFuelNumberCell: { width: 105 },
+  tableFuelStationCell: { width: 130 },
+  tableComplianceTypeCell: { width: 140 },
+  tableComplianceReferenceCell: { width: 130 },
+  tableComplianceStatusCell: { width: 120 },
+  reportDateRow: { flexDirection: 'row', gap: 8 },
+  reportDateField: { flex: 1 },
+  reportTableCard: { minWidth: 900 },
+  reportTableHeader: { fontSize: 12, fontWeight: '900', minWidth: 120, paddingHorizontal: 8 },
+  reportTableCell: { fontSize: 12, minWidth: 120, paddingHorizontal: 8 },
   form: { borderRadius: 12, gap: 10, padding: 14 },
   input: { borderRadius: 8, borderWidth: 1, fontSize: 15, padding: 11 },
   button: { backgroundColor: colors.red, borderRadius: 8, marginVertical: 3, padding: 11 },
+  buttonSecondary: { backgroundColor: '#2367c8' },
+  buttonSuccess: { backgroundColor: '#16875a' },
+  buttonArchive: { backgroundColor: '#6b7280' },
   buttonText: { color: '#fff', fontWeight: '700', textAlign: 'center' },
   pickerWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 },
   picker: { borderRadius: 8, padding: 9 },

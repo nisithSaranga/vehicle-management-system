@@ -20,6 +20,7 @@ export interface VehicleRecord {
   manufacturing_year: number;
   department: string | null;
   assigned_driver: string | null;
+  energy_type: 'fuel' | 'electric';
   fuel_type: string | null;
   status: VehicleStatus;
 }
