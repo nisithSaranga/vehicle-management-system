@@ -5,7 +5,7 @@ import { supabase, type Profile } from './lib/supabase';
 import './App.css';
 
 const config: AppConfig = {
-  appName: 'Riyon International Pvt Ltd',
+  appName: 'Riyon Vehicle Management System',
   version: '0.1.0',
 };
 const currentYear = new Date().getFullYear();
@@ -77,7 +77,7 @@ function App() {
   if (loading)
     return (
       <main>
-        <p>Loading Riyon International...</p>
+        <p>Loading Riyon Intl Vehicle Management System...</p>
       </main>
     );
   if (!user || !profile) return <Login error={error} onError={setError} />;

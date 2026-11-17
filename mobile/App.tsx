@@ -24,7 +24,7 @@ import type { Session } from '@supabase/supabase-js';
 import type { AppConfig, VehicleRecord } from '@vehicle-management/shared';
 import { supabase, type Profile } from './src/lib/supabase';
 
-const config: AppConfig = { appName: 'Riyon International Pvt Ltd', version: '0.1.0' };
+const config: AppConfig = { appName: 'Riyon Vehicle Management System', version: '0.1.0' };
 const logo = require('./assets/riyon-logo.png');
 type Section = 'fleet' | 'operations' | 'compliance' | 'maintenance' | 'fuel' | 'reports';
 type RecordRow = Record<string, unknown> & { id: string; vehicle_id: string };
@@ -35,13 +35,12 @@ const VEHICLE_TYPES = [
   'Excavator',
   'Forklift',
   'Light Truck',
-  'Lorry',
+  'Motor Lorry',
   'Motor Bike',
-  'Single Cab',
 ];
 const DEPARTMENTS = ['Administration', 'Finance', 'Logistics', 'Maintenance', 'Operations', 'Production'];
 const VEHICLE_MAKES = ['Bajaj', 'Baw', 'BYD', 'Honda', 'Komatsu', 'Mitsubishi', 'Tata', 'Yamaha'];
-const USUAL_USERS = ['Asfer', 'Gunathunga', 'Mahinda', 'Ms. Fiona', 'Nisith', 'Ramesh', 'W.U. Kumara'];
+const USUAL_USERS = ['Asfer', 'Gunathunga', 'Kamith', 'Mahinda', 'Ms. Fiona', 'Nisith', 'Ramesh','Sanjeewa', 'W.U. Kumara'];
 async function normalizeImage(uri: string) {
   const result = await ImageManipulator.manipulateAsync(
     uri,
@@ -95,10 +94,10 @@ export default function App() {
   const dark = theme === 'dark';
   const palette = useMemo(
     () => ({
-      bg: dark ? '#111827' : '#f5f7fb',
-      card: dark ? '#1f2937' : '#fff',
-      text: dark ? '#f3f4f6' : colors.navy,
-      muted: dark ? '#cbd5e1' : colors.muted,
+      bg: dark ? '#000000' : '#f5f7fb',
+      card: dark ? '#000000' : '#fff',
+      text: dark ? '#ffffff' : colors.muted,
+      muted: dark ? '#ffffff' : colors.muted,
     }),
     [dark],
   );
@@ -151,7 +150,7 @@ export default function App() {
   if (loading)
     return (
       <Centered palette={palette}>
-        <Text style={{ color: palette.text }}>Loading Riyon International...</Text>
+        <Text style={{ color: palette.text }}>Loading Riyon Vehicle Management System...</Text>
       </Centered>
     );
   if (!session || !profile) return <Login error={error} onError={setError} palette={palette} />;
@@ -418,9 +417,9 @@ function Login({
   return (
     <Centered palette={palette}>
       <Image source={logo} style={styles.logo} resizeMode="contain" />
-      <Text style={[styles.eyebrow, { color: palette.muted }]}>VEHICLE MANAGEMENT</Text>
-      <Text style={[styles.title, { color: palette.text }]}>{config.appName}</Text>
-      <Text style={[styles.subtitle, { color: palette.muted }]}>Vehicle Management System</Text>
+     {/** <Text style={[styles.eyebrow, { color: palette.muted }]}>VEHICLE MANAGEMENT</Text> */}
+      <Text style={[styles.title, { color: palette.text }]}>Riyon Vehicle Management</Text>
+      {/*<Text style={[styles.subtitle, { color: palette.muted }]}>Vehicle Management System</Text>*/}
       <View style={[styles.loginCard, { backgroundColor: palette.card }]}>
         <Field label="Email" value={email} onChange={setEmail} palette={palette} />
         <Field label="Password" value={password} onChange={setPassword} secure palette={palette} />

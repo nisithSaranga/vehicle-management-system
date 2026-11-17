@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Riyon International Pvt Ltd",
+    "name": "Riyon Vehicle Management System",
     "slug": "riyon-international-fleet",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -21,14 +21,14 @@
       "package": "com.riyoninternational.vehiclemanagement",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
+        "foregroundImage": "./assets/riyon-logo.png",
+        "backgroundImage": "./assets/riyon-logo.png",
+        "monochromeImage": "./assets/riyon-logo.png"
       },
       "predictiveBackGestureEnabled": false
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/riyon-logo.png"
     },
     "extra": {
       "eas": {

@@ -16,7 +16,7 @@ main {
 
 :root[data-theme='dark'] {
   --page-background: #000000;
-  --surface: #1d2935;
+  --surface: #000000;
   --text-primary: #f0f4f8;
   --text-secondary: #bcccdc;
   --border: #486581;
